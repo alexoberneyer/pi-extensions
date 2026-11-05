@@ -1,0 +1,65 @@
+{
+  "name": "@alexoberneyer/pi-extensions",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexoberneyer/pi-extensions.git"
+  },
+  "description": "Portable Pi extensions for editing, research, agent supervision and communication review",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "extensions/",
+    "lib/",
+    "bin/",
+    "helpers/",
+    "workflows/",
+    "agents/",
+    "examples/",
+    "docs/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/approval/index.ts",
+      "./extensions/agents/index.ts",
+      "./extensions/comms/index.ts",
+      "./extensions/dev01/index.ts",
+      "./extensions/fast/index.ts",
+      "./extensions/supervisor/index.ts",
+      "./extensions/vim/index.ts",
+      "./extensions/web/index.ts",
+      "./extensions/workflows/index.ts",
+      "./extensions/workstation/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "prettier": "3.8.1"
+  },
+  "scripts": {
+    "test": "node scripts/test.mjs",
+    "test:python": "node scripts/test.mjs --python",
+    "lint:check": "prettier --check .",
+    "lint:fix": "prettier --write .",
+    "check:release": "node scripts/check-release.mjs"
+  }
+}

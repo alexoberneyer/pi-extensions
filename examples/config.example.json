@@ -1,0 +1,36 @@
+{
+  "identity": {
+    "name": "Example User",
+    "timeZone": "UTC"
+  },
+  "remote": {
+    "host": null,
+    "project": "~/projects/example",
+    "sharedDirectory": "shared-dev"
+  },
+  "fast": {
+    "defaultTier": "off"
+  },
+  "approval": {
+    "protectedCommands": [],
+    "readCommands": []
+  },
+  "comms": {
+    "notesDirectory": null,
+    "triageInstructions": null,
+    "messageInstructions": null,
+    "meetingInstructions": null,
+    "reminderList": "Next",
+    "remarkableSource": null,
+    "notebookName": "Scratchpad"
+  },
+  "workstation": {
+    "memory": false,
+    "memoryDirectory": null,
+    "styleFile": null,
+    "skillPaths": [],
+    "promptPaths": [],
+    "qmdHook": null,
+    "usageLog": null
+  }
+}

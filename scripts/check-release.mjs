@@ -27,6 +27,8 @@ const rootFiles = new Set([
   ".gitignore",
   ".prettierignore",
   "README.md",
+  "AGENTS.md",
+  "CLAUDE.md",
   "CHANGELOG.md",
   "LICENSE",
   "NOTICE.md",
@@ -80,26 +82,20 @@ function walk(directory, prefix = "") {
       problems.push(`${path}: private configuration filename`);
     const text = readFileSync(join(directory, name), "utf8");
     if (text.includes("\0")) problems.push(`${path}: binary content`);
-    if (
-      /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{24,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{15,})/.test(
-        text,
-      )
-    )
-      problems.push(`${path}: possible embedded credential; inspect privately`);
-    if (
-      /\/Users\/alex(?:\/|\b)|\/home\/alex(?:\/|\b)|\bcb[-]dev\b|\bcargo(?:board)\b/i.test(
-        text,
-      )
-    )
-      problems.push(
-        `${path}: private source identity/path; replace with a neutral fixture`,
-      );
     if (extname(name) === ".md" && /\u2014|\u2013|&mdash;|&ndash;/.test(text))
       problems.push(`${path}: forbidden dash punctuation`);
     paths.push(path);
   }
 }
 walk(root);
+const privacy = spawnSync(
+  "python3",
+  ["scripts/public_repo_guard.py", "worktree"],
+  { cwd: root, encoding: "utf8", timeout: 60_000 },
+);
+if (privacy.status !== 0)
+  problems.push(privacy.stderr?.trim() || "Disclosure guard failed to run");
+else if (privacy.stderr) console.error(privacy.stderr.trim());
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 for (const entry of manifest.pi?.extensions || [])
   if (!paths.includes(entry.replace(/^\.\//, "")))

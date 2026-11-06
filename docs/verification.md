@@ -28,7 +28,12 @@ Dependency acquisition requires network access on first use. Notebook fixtures a
 
 ## Release gate
 
-`npm run check:release` checks the working tree's public-file allowlist, obvious embedded secrets, private source paths and Markdown punctuation. It excludes ignored dependency/cache directories. It also verifies the npm package contents through a script-free dry run. This is a release guard, not proof that no secret or legal issue exists.
+`npm run check:release` checks the working tree's public-file allowlist and Markdown punctuation, then runs the disclosure guard for obvious credentials, personal home paths and external private matching rules. It excludes ignored dependency/cache directories. It also verifies the npm package contents through a script-free dry run. This is a release guard, not proof that no secret or legal issue exists.
+
+Install the local pre-push check with `python3 scripts/public_repo_guard.py install`.
+It inspects outgoing history and commit messages, not only the latest tree.
+See [public repository safety](public-repo-safety.md) for private rule setup and
+limitations. `npm test` also runs its synthetic Git regression tests.
 
 Before tagging a release:
 

@@ -2,6 +2,8 @@
 
 A local review queue for communication requests, meeting follow-ups and optional reMarkable captures. Nothing polls on startup. Browsing saved items makes no model or connector calls.
 
+![Comms review queue with request details, actions and source coverage, shown with demo data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-demo.gif)
+
 ## Standalone use
 
 With Pi and this package's JavaScript dependencies already installed, start from the package root:

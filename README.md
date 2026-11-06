@@ -2,9 +2,13 @@
 
 Ten extensions for [Pi](https://github.com/earendil-works/pi). One package, with optional local integrations. Tested against Pi 1.5.0 and Node 26.8.1. Pi requires Node 22.19.0 or newer. Other Pi versions are not yet verified.
 
+![Agents dashboard with Pi and Claude Code sessions across three projects, shown with demo data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/agents-demo.gif)
+
+`/agents`: Pi, Claude Code, Codex and tmux sessions in one view.
+
 ![Comms review queue with request details, actions and source coverage, shown with demo data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-demo.gif)
 
-Comms running `/comms demo` on disposable sample data.
+`/comms demo`: requests, drafts and follow-ups in one review queue, with sample data.
 
 ## Install
 
@@ -88,7 +92,7 @@ npm run lint:check
 npm run check:release
 ```
 
-Re-render the demo GIF with [VHS](https://github.com/charmbracelet/vhs): run `vhs docs/demo/comms.tape` from the repository root. It writes `/tmp/comms-demo.gif`.
+Re-render the demo GIFs with [VHS](https://github.com/charmbracelet/vhs): run `vhs docs/demo/agents.tape` or `vhs docs/demo/comms.tape` from the repository root. They write to `/tmp` and use throwaway directories and sample data only.
 
 The Node test runner uses a fresh HOME, explicit environment and temporary state. It selects the installed Pi package automatically, or accepts `PI_TEST_PACKAGE_DIR`. Tests use fixture agents, local sockets and intercepted HTTP requests. They do not call a model or read your real queue, notebooks or credentials.
 

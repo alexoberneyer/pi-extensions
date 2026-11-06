@@ -738,6 +738,52 @@ test("selected details separate connection from native titles and preserve messa
   }
 });
 
+test("external descriptions preserve both preview lines and keep native IDs out of titles", () => {
+  const agent = row({
+    source: "claude",
+    nativeId: "ee1e0177-c05c-4729-a5b0-33dd2ae4816d",
+    title: "Review local notes",
+    preview:
+      "Recent progress ".repeat(7) + "Second preview line stays visible.",
+    status: "ready",
+    updated: 0,
+    live: true,
+  });
+  const { view } = makeDashboard([agent]);
+  const lines = view.render(140).map(stripTerminalSequences);
+  const output = lines.join("\n");
+  assert.match(output, /Second preview line stays visible/);
+  assert.doesNotMatch(output, /Activity time not provided by Claude/);
+  assert.match(
+    lines.find((line) => line.includes("Connection:")),
+    /Conversation ee1e0177/,
+  );
+  for (const line of lines.filter((line) => line.includes(agent.title)))
+    assert.doesNotMatch(line, /ee1e0177/);
+});
+
+test("healthy external rows show recent text even when native status is unknown", () => {
+  const agent = row({
+    source: "codex",
+    status: "unknown",
+    live: true,
+    preview: "The parser now handles empty invoices.",
+    detail: "Unrecognized native status, not conversation text.",
+  });
+  const { view } = makeDashboard([agent]);
+  assert.match(
+    view.render(140).join("\n"),
+    /The parser now handles empty invoices/,
+  );
+  view.setData([
+    { ...agent, live: false, detail: "Discovery unavailable. Last seen data." },
+  ]);
+  assert.match(
+    view.render(140).join("\n"),
+    /Discovery unavailable. Last seen data/,
+  );
+});
+
 test("bounded search rendering preserves focus and its cursor marker across resize", () => {
   const { view } = makeDashboard([row({ status: "ready" })]);
   view.focused = true;

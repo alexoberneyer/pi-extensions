@@ -14,6 +14,7 @@ import {
   type Presence,
 } from "./state.ts";
 import { isTmuxTarget, type TmuxTarget } from "./tmux-target.ts";
+import { meaningfulTitle } from "./descriptions.ts";
 
 export const PANE_FORMAT = [
   "#{socket_path}",
@@ -24,6 +25,7 @@ export const PANE_FORMAT = [
   "#{session_name}",
   "#{@pi-agents-agent}",
   "#{pane_pid}",
+  "#{s/[\t\r\n]/ /:pane_title}",
 ].join("\t");
 
 function positivePid(value: unknown): value is number {
@@ -77,7 +79,28 @@ function descendantPids(
   return result;
 }
 
-function terminalTitle(agent: AgentRow["tmuxAgent"], cwd: string): string {
+function terminalTitle(
+  agent: AgentRow["tmuxAgent"],
+  cwd: string,
+  paneTitle?: string,
+  name?: string,
+): string {
+  if (agent !== "pi") {
+    const title = meaningfulTitle(
+      plain(paneTitle || "")
+        .replace(/^[✳✻✽✢⏺●○◐◑◒◓\s]+/u, "")
+        .replace(/^(?:claude(?: code)?|(?:openai )?codex)\s*[-·:|]\s*/i, ""),
+    );
+    if (
+      title &&
+      !/^(?:claude(?: code)?|(?:openai )?codex|.*claude agents|.*awaiting input.*)$/i.test(
+        title,
+      )
+    )
+      return title;
+    const label = meaningfulTitle(name);
+    if (label && label !== "job") return label;
+  }
   return plain(`${sources[agent ?? "pi"]} in ${basename(cwd) || cwd}`, 160);
 }
 
@@ -96,8 +119,9 @@ export function localTmuxRows(
   for (const line of output.split("\n")) {
     if (!line) continue;
     const fields = line.split("\t");
-    if (fields.length !== 8) continue;
-    const [socket, session, pane, dead, cwd, name, agent, rawPid] = fields;
+    if (fields.length !== 8 && fields.length !== 9) continue;
+    const [socket, session, pane, dead, cwd, name, agent, rawPid, title] =
+      fields;
     const tmux = { socket, session, pane };
     if (!isTmuxTarget(tmux) || !isAbsolute(cwd) || !["0", "1"].includes(dead))
       continue;
@@ -117,7 +141,8 @@ export function localTmuxRows(
       key: `tmux:${socket}:${pane}`,
       live: dead === "0",
       cwd: pathKey(cwd),
-      title: terminalTitle(tmuxAgent, cwd),
+      title: terminalTitle(tmuxAgent, cwd, title, name),
+      tmuxTitle: plain(title || "", 160),
       preview:
         dead === "1"
           ? "Retained terminal output. The process exited."
@@ -193,6 +218,10 @@ export function mergeLocalTmux(rows: AgentRow[]): AgentRow[] {
     ...row,
     tmux: pane.tmux,
     tmuxName: pane.tmuxName,
+    title:
+      row.source === "claude" && row.title === terminalTitle("claude", row.cwd)
+        ? pane.title
+        : row.title,
     nativeCommand: pane.nativeCommand,
     detail: [row.detail, pane.detail].filter(Boolean).join(" · "),
   });
@@ -225,7 +254,12 @@ export function mergeLocalTmux(rows: AgentRow[]): AgentRow[] {
         ? {
             ...row,
             source: row.tmuxAgent,
-            title: terminalTitle(row.tmuxAgent, row.cwd),
+            title: terminalTitle(
+              row.tmuxAgent,
+              row.cwd,
+              row.tmuxTitle,
+              row.tmuxName,
+            ),
           }
         : row,
     );

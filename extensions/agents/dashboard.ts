@@ -74,6 +74,13 @@ function sourceLabel(row: AgentRow): string {
 }
 
 function connectionLabel(row: AgentRow): string {
+  const connection = terminalConnectionLabel(row);
+  return row.nativeId
+    ? `${connection} · Conversation ${plain(row.nativeId, 200)}`
+    : connection;
+}
+
+function terminalConnectionLabel(row: AgentRow): string {
   const target = row.host ? row.remoteTmux : row.tmux;
   const tmux = target
     ? `tmux · ${row.tmuxName ? `${plain(row.tmuxName, 80)} · ` : ""}Session ${target.session} · Pane ${target.pane || "n/a"}`
@@ -805,11 +812,17 @@ export class Dashboard implements Component, Focusable {
         : "",
     );
     const preview = wrapTextWithAnsi(
-      (row?.status === "unknown" ? row.detail || row.preview : row?.preview) ||
-        "No message preview yet.",
+      (row?.status === "unknown" && (row.source === "pi" || !row.live)
+        ? row.detail || row.preview
+        : row?.preview || row?.detail) || "No message preview yet.",
       w,
     ).slice(0, 2);
-    if (row?.source === "claude" && !row.updated && row.status !== "unknown")
+    if (
+      row?.source === "claude" &&
+      !row.updated &&
+      row.status !== "unknown" &&
+      !preview[1]
+    )
       preview[1] = "Activity time not provided by Claude.";
     lines.push(
       th.fg("muted", preview[0] || ""),

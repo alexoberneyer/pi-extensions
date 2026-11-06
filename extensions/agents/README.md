@@ -38,6 +38,14 @@ Native command strings are only copied, never executed by selecting an external 
 
 External adapters poll every five seconds while browsing. One failed adapter does not hide another. Failed evidence becomes State unavailable and disables stale attach commands. Poll time is not substituted for last activity.
 
+## Conversation descriptions
+
+Claude and Codex keep meaningful native names. Hash-only names fall back to the first readable user prompt. Verified empty sessions say New session. Missing task metadata keeps an honest project label, not an invented task. Native conversation IDs stay in connection details.
+
+Local adapters read existing native metadata for discovered sessions, respecting `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. Each transcript read is bounded to its first and last 256 KiB, cached in dashboard memory until the file changes. Only user/assistant text is displayed, never reasoning or tool output. A pending question takes priority over recent conversation text. Missing or corrupt metadata does not change native status, activity time or attachment authority.
+
+Tmux-only Claude and Codex panes use meaningful agent-set pane titles or custom session names. Generic application titles and generated job hashes are ignored. These labels never prove thread ownership. Pi descriptions and its ownership checks are unchanged. Remote discovery still uses the remote probe's native metadata, without reading remote transcripts on the Mac.
+
 `PI_AGENTS_EXTERNAL=0` disables external discovery. `PI_AGENTS_DEV01=0` disables the configured remote adapter. No remote probe runs with the default null host.
 
 ## Launching and attachment

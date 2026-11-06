@@ -76,6 +76,8 @@ export interface AgentRow {
   live: boolean;
   detail?: string;
   nativeCommand?: string;
+  nativeId?: string;
+  tmuxTitle?: string;
   tmux?: TmuxTarget;
   remoteTmux?: RemoteTmuxTarget;
   tmuxName?: string;

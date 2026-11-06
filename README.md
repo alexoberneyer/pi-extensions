@@ -19,7 +19,7 @@ Once a reviewed tag is available on GitHub:
 pi install git:github.com/alexoberneyer/pi-extensions@v0.1.0
 ```
 
-That command is a future release example, not a claim that the tag exists. While the repository is private, Git access is required. No npm publication is needed.
+That command is a future release example, not a claim that the tag exists. No npm publication is needed.
 
 Run `/reload` in existing Pi sessions. Use `pi config` to select the extensions you want. Package filters can select individual entrypoints, for example:
 

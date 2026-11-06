@@ -1,7 +1,7 @@
 # Renders the README demo GIF. Run from the repository root: vhs docs/demo/comms.tape
 # Pi starts in a throwaway agent and config directory, so no real settings,
 # sessions, queue or credentials are loaded. Only demo fixtures are shown.
-Output /tmp/comms-demo.gif
+Output "/tmp/comms-demo.gif"
 
 Set FontSize 16
 Set Width 1200

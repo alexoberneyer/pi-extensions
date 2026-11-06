@@ -92,7 +92,7 @@ npm run lint:check
 npm run check:release
 ```
 
-Re-render the demo GIFs with [VHS](https://github.com/charmbracelet/vhs): run `vhs docs/demo/agents.tape` or `vhs docs/demo/comms.tape` from the repository root. They write to `/tmp` and use throwaway directories and sample data only.
+Re-render the demo GIFs with [VHS](https://github.com/charmbracelet/vhs): run `vhs docs/demo/agents.tape` or `vhs docs/demo/comms.tape` from the repository root. They write to `/tmp` and use throwaway directories and sample data only. Review every frame, then replace the release assets with `gh release upload v0.1.0 /tmp/agents-demo.gif /tmp/comms-demo.gif --clobber`.
 
 The Node test runner uses a fresh HOME, explicit environment and temporary state. It selects the installed Pi package automatically, or accepts `PI_TEST_PACKAGE_DIR`. Tests use fixture agents, local sockets and intercepted HTTP requests. They do not call a model or read your real queue, notebooks or credentials.
 

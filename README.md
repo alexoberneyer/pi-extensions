@@ -2,6 +2,10 @@
 
 Ten extensions for [Pi](https://github.com/earendil-works/pi). One package, with optional local integrations. Tested against Pi 1.5.0 and Node 26.8.1. Pi requires Node 22.19.0 or newer. Other Pi versions are not yet verified.
 
+![Comms review queue with request details, actions and source coverage, shown with demo data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-demo.gif)
+
+Comms running `/comms demo` on disposable sample data.
+
 ## Install
 
 Review the source before installing. Extensions run with your operating-system permissions. This package is not a sandbox.
@@ -83,6 +87,8 @@ npm run test:python
 npm run lint:check
 npm run check:release
 ```
+
+Re-render the demo GIF with [VHS](https://github.com/charmbracelet/vhs): run `vhs docs/demo/comms.tape` from the repository root. It writes `/tmp/comms-demo.gif`.
 
 The Node test runner uses a fresh HOME, explicit environment and temporary state. It selects the installed Pi package automatically, or accepts `PI_TEST_PACKAGE_DIR`. Tests use fixture agents, local sockets and intercepted HTTP requests. They do not call a model or read your real queue, notebooks or credentials.
 

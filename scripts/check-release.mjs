@@ -64,7 +64,9 @@ function walk(directory, prefix = "") {
       continue;
     }
     if (
-      !new Set([".ts", ".mjs", ".md", ".json", ".py"]).has(extname(name)) &&
+      !new Set([".ts", ".mjs", ".md", ".json", ".py", ".tape"]).has(
+        extname(name),
+      ) &&
       !["LICENSE", ".gitignore", ".prettierignore", ".npmignore"].includes(name)
     ) {
       problems.push(`${path}: unexpected file type`);

@@ -30,13 +30,11 @@ Dependency acquisition requires network access on first use. Notebook fixtures a
 
 `npm run check:release` checks the working tree's public-file allowlist, obvious embedded secrets, private source paths and Markdown punctuation. It excludes ignored dependency/cache directories. It also verifies the npm package contents through a script-free dry run. This is a release guard, not proof that no secret or legal issue exists.
 
-Before making the repository public:
+Before tagging a release:
 
-1. Confirm ownership and license compatibility, including any employer-owned contributions.
-2. Inspect the exact Git diff and package file list. Keep configuration, queues, drafts, notebooks, session histories and credentials out.
-3. Run the full suite against the stated Pi version. Exercise standalone filtered installations and missing optional dependencies.
-4. Test a fresh local package installation and rollback before changing a working installation.
-5. Publish a reviewed version tag only after repository visibility and publishing have been explicitly approved.
+1. Inspect the exact Git diff and package file list. Keep configuration, queues, drafts, notebooks, session histories and credentials out.
+2. Run the full suite against the stated Pi version. Exercise standalone filtered installations and missing optional dependencies.
+3. Test a fresh local package installation and rollback before changing a working installation.
 
 The private source repository's Git history is not part of this extraction. No imported private configuration or runtime state is needed to run the tests.
 
@@ -44,9 +42,9 @@ The private source repository's Git history is not part of this extraction. No i
 
 Verified locally with Pi 1.5.0, Node 26.8.1 and Prettier 3.8.1:
 
-- Node: 999 tests passed, none failed or skipped.
+- Node: 1032 tests passed, none failed or skipped.
 - Python: 69 tests passed with the optional codec dependencies present, none skipped.
 - All ten extensions load from an actual packed archive after a script-free, runtime-only dependency installation. `ws` resolves inside that installation, not through a parent checkout.
 - Formatting and the release-content checks pass.
 
-Real connectors, production services, desktop applications and model calls were not exercised. Live settings and existing extension links were not switched. These checks do not publish code, create release tags or change repository visibility. See [performance](performance.md) for the bounded model-free load comparison.
+Real connectors, production services, desktop applications and model calls were not exercised. Live settings and existing extension links were not switched. See [performance](performance.md) for the bounded model-free load comparison.

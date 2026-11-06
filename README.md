@@ -13,13 +13,11 @@ npm ci --ignore-scripts --legacy-peer-deps
 pi install /absolute/path/to/pi-extensions
 ```
 
-Once a reviewed tag is available on GitHub:
+From GitHub:
 
 ```sh
 pi install git:github.com/alexoberneyer/pi-extensions@v0.1.0
 ```
-
-That command is a future release example, not a claim that the tag exists. No npm publication is needed.
 
 Run `/reload` in existing Pi sessions. Use `pi config` to select the extensions you want. Package filters can select individual entrypoints, for example:
 
@@ -92,4 +90,4 @@ The standard-library Python tests skip codec fixtures when optional dependencies
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and [dependency notes](NOTICE.md). Confirm ownership and redistribution rights before changing repository visibility. Local installation does not authorize publishing private configuration or runtime data.
+MIT. See [LICENSE](LICENSE) and [dependency notes](NOTICE.md).

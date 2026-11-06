@@ -16,6 +16,4 @@ Optional Python features acquire `rmscene`, Pillow or trafilatura through uv. Th
 
 Brave, Microsoft 365, Notion, Claude, OpenAI, reMarkable and Apple service/application names identify integrations. This repository includes neither their credentials nor a license to access their services.
 
-## Publication review
-
-The MIT license covers code the repository owner is entitled to license. A technical extraction cannot establish employment-related ownership or clear undisclosed third-party contributions. Confirm those rights before making the repository public. Preserve this notice when adding or vendoring upstream code.
+Preserve these notes when adding or vendoring upstream code.

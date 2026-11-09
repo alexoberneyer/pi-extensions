@@ -121,7 +121,7 @@ function itemStatus(item: Item): string {
   if (item.draftStale) return "Review draft";
   if (item.snoozedUntil && Date.parse(item.snoozedUntil) > Date.now())
     return "Snoozed";
-  return `${item.status}${item.draft ? " · draft" : ""}`;
+  return `${item.status}${item.draft ? " · draft ready" : ""}`;
 }
 function taskKey(task: NextTask): string {
   return JSON.stringify([task.title, task.due]);
@@ -345,17 +345,24 @@ export class Dashboard implements Component, Focusable {
                 ? [
                     {
                       value: "draft-ai",
-                      label: "Draft with AI · returns to conversation",
+                      label: "Draft with AI · return to queue when ready",
                     },
                   ]
                 : []),
               ...(item.draft ? [{ value: "copy", label: "Copy draft" }] : []),
-              ...(!this.demo && item.draft && !item.draftStale
+              ...(!this.demo &&
+              ["mail", "teams"].includes(item.source) &&
+              ["open", "waiting"].includes(item.status) &&
+              item.account !== "unverified" &&
+              item.draft.trim() &&
+              !item.draftStale
                 ? [
                     {
                       value: "handoff",
                       label:
-                        "Use draft in message workflow · review before sending",
+                        item.source === "mail"
+                          ? "Review & create Outlook draft"
+                          : "Review & send reply",
                     },
                   ]
                 : []),

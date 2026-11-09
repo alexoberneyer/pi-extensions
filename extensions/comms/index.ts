@@ -4,12 +4,17 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { packagePath, readConfig } from "../../lib/config.mjs";
-import { initializeApproval } from "../approval/ready.ts";
+import {
+  approvalStatus,
+  initializeApproval,
+  requireApproval,
+} from "../approval/ready.ts";
 import {
   copyToClipboard,
   getAgentDir,
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -48,7 +53,6 @@ import {
   draftPrompt,
   meetingInstructions,
   meetingRequest,
-  messageRequest,
   notesRequest,
   notesDirectory,
   refreshPrompt,
@@ -74,6 +78,15 @@ import {
   type Page,
 } from "./remarkable.ts";
 
+import {
+  ReplyJob,
+  microsoftRead,
+  replyOperation,
+  replyPrompt,
+  replySchema,
+  replyTool,
+} from "./reply.ts";
+
 const runFile = promisify(execFile);
 const commandHelp = `Comms commands:
 /comms: open the saved queue
@@ -86,6 +99,7 @@ const commandHelp = `Comms commands:
 /comms demo: open disposable demo data
 /comms help: show this help`;
 type Job =
+  | ReplyJob
   | {
       kind: "refresh";
       id: string;
@@ -93,7 +107,7 @@ type Job =
       state: State;
       completed: Set<string>;
     }
-  | { kind: "draft"; key: string; revision: number }
+  | { kind: "draft"; key: string; revision: number; revoked?: boolean }
   | {
       kind: "capture";
       id: string;
@@ -118,6 +132,7 @@ export default async function comms(pi: ExtensionAPI) {
     "comms_ingest",
     "comms_save_draft",
     "comms_save_capture",
+    replyTool,
   ];
   const authorized = new Set<string>();
   function activateTools(...names: string[]): void {
@@ -148,9 +163,93 @@ export default async function comms(pi: ExtensionAPI) {
   const nextNotLoaded = "Not loaded. Ctrl+R reads Reminders on this Mac.";
   let nextStatus = nextNotLoaded;
   const store = () => new Store(join(getAgentDir(), "comms"));
+  let returnToQueue:
+    | {
+        id: string;
+        sessionId: string;
+        prompt: string;
+        revoked: boolean;
+        notice?: string;
+      }
+    | undefined;
+  let queuedReturn: typeof returnToQueue;
+  let queueNotice = "";
+  let retiringReply: ReplyJob | undefined;
+  let uiWaiting = false;
+  function revokeReply(): void {
+    if (job?.kind === "reply" || job?.kind === "draft") job.revoked = true;
+    if (returnToQueue) returnToQueue.revoked = true;
+    queuedReturn = undefined;
+  }
+  function safeReturn(ctx: ExtensionContext, sessionId: string): boolean {
+    const approval = approvalStatus(pi);
+    return (
+      approval?.ready === true &&
+      !approval.planning &&
+      active &&
+      !planning &&
+      !external &&
+      !job &&
+      !browsing &&
+      !uiWaiting &&
+      ctx.mode === "tui" &&
+      ctx.isIdle() &&
+      ctx.sessionManager.getSessionId() === sessionId &&
+      !ctx.hasPendingMessages() &&
+      !ctx.ui.getEditorText().trim()
+    );
+  }
+  function finishReply(): void {
+    if (job?.kind === "reply") {
+      retiringReply = job;
+      job.finish();
+    }
+  }
+  pi.on("input", (event) => {
+    queuedReturn = undefined;
+    if (
+      returnToQueue &&
+      !(event.source === "extension" && event.text === returnToQueue.prompt)
+    )
+      revokeReply();
+  });
+  pi.on("before_agent_start", (event) => {
+    queuedReturn = undefined;
+    const prompt =
+      event.messageType === "user"
+        ? event.prompt
+        : event.message?.customType === "comms-selected-action"
+          ? event.message.content
+          : undefined;
+    if (returnToQueue && prompt !== returnToQueue.prompt) revokeReply();
+  });
+  pi.on("ui_prompt_start", () => {
+    uiWaiting = true;
+  });
+  pi.on("ui_prompt_end", () => {
+    uiWaiting = false;
+  });
+  pi.on("user_bash", () => {
+    revokeReply();
+  });
+  pi.on("message_end", (event) => {
+    if (
+      event.message.role === "assistant" &&
+      ["error", "aborted"].includes(event.message.stopReason)
+    )
+      revokeReply();
+  });
+  for (const event of [
+    "session_before_switch",
+    "session_before_fork",
+    "session_before_tree",
+    "session_tree",
+  ] as const)
+    pi.on(event, () => revokeReply());
 
   pi.events.on("dotfiles:plan-mode", (value) => {
     planning = value === true;
+    if (planning) revokeReply();
     if (planning && job?.kind === "capture") {
       job.revoked = true;
       subprocess?.abort();
@@ -162,6 +261,9 @@ export default async function comms(pi: ExtensionAPI) {
   });
   pi.on("session_shutdown", async () => {
     active = false;
+    revokeReply();
+    finishReply();
+    returnToQueue = undefined;
     deactivateTools();
     job = undefined;
     closeView?.();
@@ -169,14 +271,46 @@ export default async function comms(pi: ExtensionAPI) {
     external?.controller.abort();
     await external?.finished;
   });
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (event, ctx) => {
+    const back = returnToQueue;
+    if (back && job?.kind === "reply") back.notice = job.notice;
+    if (back && job?.kind === "draft")
+      back.notice =
+        "AI drafting finished. Review the saved local text; nothing was sent.";
+    if (back && (job?.kind === "reply" || job?.kind === "draft") && job.revoked)
+      back.revoked = true;
+    finishReply();
     job = undefined;
+    returnToQueue = undefined;
     deactivateTools(toolNames.filter((name) => name !== "comms_snapshot"));
+    if (
+      !back ||
+      back.revoked ||
+      event.aborted ||
+      !safeReturn(ctx, back.sessionId)
+    )
+      return;
+    queuedReturn = back;
+    // Command dispatch is deferred until every settled handler has finished.
+    // The command rechecks idle/input/session state before showing an overlay.
+    pi.sendUserMessage(`/comms return ${back.id}`, {
+      expandPromptTemplates: true,
+    });
+  });
+  pi.on("tool_result", (event) => {
+    if (job?.kind !== "reply" || event.isError) return;
+    const tool = pi.getAllTools().find((tool) => tool.name === event.toolName);
+    if (microsoftRead(event.toolName, tool)) job.reads.add(event.toolCallId);
   });
 
   // The triage/drafting pass cannot perform external writes, including nested
   // codemode calls. This guard is a workflow boundary, not an OS sandbox.
-  pi.on("tool_call", (event) => {
+  pi.on("tool_call", (event, ctx) => {
+    if (retiringReply?.owns(event))
+      return {
+        block: true,
+        reason: "Reply authorization revoked by lifecycle change.",
+      };
     if (
       toolNames.includes(event.toolName) &&
       (!active || !authorized.has(event.toolName))
@@ -187,6 +321,14 @@ export default async function comms(pi: ExtensionAPI) {
           "Activate the required tool through a user /comms action first.",
       };
     if (!job) return;
+    if (job.kind === "reply") {
+      try {
+        job.guard(event, ctx, pi);
+      } catch (error) {
+        return { block: true, reason: errorMessage(error) };
+      }
+      return;
+    }
     if (job.kind === "capture") {
       if (event.toolName === "comms_save_capture") return;
       if (
@@ -259,6 +401,18 @@ export default async function comms(pi: ExtensionAPI) {
           "Open /comms or start /comms refresh pi before reading the queue.",
         );
       const state = store().read();
+      if (job?.kind === "reply") {
+        const selected = job.item;
+        return result({
+          ...state,
+          items: state.items.filter((item) => item.key === selected.key),
+          coverage: state.coverage.filter(
+            (row) =>
+              row.source === selected.source &&
+              row.account === selected.account,
+          ),
+        });
+      }
       return result(
         job?.kind === "refresh"
           ? {
@@ -350,6 +504,7 @@ export default async function comms(pi: ExtensionAPI) {
         !authorized.has("comms_save_draft") ||
         planning ||
         job?.kind !== "draft" ||
+        job.revoked ||
         job.key !== args.key ||
         job.revision !== args.expectedRevision
       )
@@ -405,11 +560,45 @@ export default async function comms(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: replyTool,
+    defaultActive: false,
+    exposure: "model-only",
+    executionMode: "sequential",
+    label: "Deliver selected Comms reply",
+    description:
+      "One-shot selected-item reply, after fresh read verification. Uses the bundled exact-payload approval guard for one Teams send or Outlook draft; never sends email. Unsupported tools/schemas stay local. Verification is model judgment.",
+    parameters: replySchema,
+    reachesTools: (input) =>
+      typeof input.writeTool === "string" ? [input.writeTool] : [],
+    async execute(id, args, signal, _onUpdate, ctx) {
+      if (
+        !active ||
+        planning ||
+        !authorized.has(replyTool) ||
+        job?.kind !== "reply"
+      )
+        throw new Error("Select Review & send/create draft in /comms first.");
+      const current = job;
+      const outcome = await current.deliver(id, args, signal, ctx, pi);
+      if (
+        active &&
+        !current.revoked &&
+        ctx.sessionManager.getSessionId() === current.sessionId
+      )
+        ctx.ui.notify(
+          outcome.content[0].text,
+          outcome.isError ? "warning" : "info",
+        );
+      return outcome;
+    },
+  });
+
   function runningJob(): string | undefined {
     if (external)
       return `${external.status}\nClaude triage is already running. Use /comms cancel to stop it.`;
     if (job)
-      return `Comms ${job.kind === "draft" ? "drafting" : job.kind === "capture" ? "scratchpad capture" : "Pi-native triage"} is already running in Pi. Press Escape in Pi to stop it. /comms cancel only stops Claude triage.`;
+      return `Comms ${job.kind === "draft" ? "drafting" : job.kind === "reply" ? "reply" : job.kind === "capture" ? "scratchpad capture" : "Pi-native triage"} is already running in Pi. Press Escape in Pi to stop it. /comms cancel only stops Claude triage.`;
     return undefined;
   }
   function canStart(ctx: ExtensionCommandContext): void {
@@ -539,15 +728,72 @@ export default async function comms(pi: ExtensionAPI) {
       throw error;
     }
   }
+  function sendSelectedAction(prompt: string): void {
+    // Custom turns enter Pi's run lifecycle before model/auth errors. Unlike
+    // sendUserMessage's async preflight, those failures settle and release claims.
+    pi.sendMessage(
+      { customType: "comms-selected-action", content: prompt, display: true },
+      { triggerTurn: true },
+    );
+  }
   function startDraft(ctx: ExtensionCommandContext, item: Item): void {
     canStart(ctx);
     const file = canonical("message");
+    const prompt = draftPrompt(item, file);
     job = { kind: "draft", key: item.key, revision: item.draftRevision };
+    returnToQueue = {
+      id: randomUUID(),
+      sessionId: ctx.sessionManager.getSessionId(),
+      prompt,
+      revoked: false,
+    };
     try {
       activateTools("comms_snapshot", "comms_save_draft");
-      pi.sendUserMessage(draftPrompt(item, file));
+      sendSelectedAction(prompt);
     } catch (error) {
       job = undefined;
+      returnToQueue = undefined;
+      deactivateTools(["comms_save_draft"]);
+      throw error;
+    }
+  }
+  function startReply(ctx: ExtensionCommandContext, item: Item): void {
+    canStart(ctx);
+    if (requireApproval(pi).planning)
+      throw new Error("Leave /plan mode before replying.");
+    const supported = pi.getAllTools().some((tool) => {
+      const op = replyOperation(tool);
+      return item.source === "mail"
+        ? op === "outlook_create_draft"
+        : item.source === "teams" &&
+            Boolean(op) &&
+            op !== "outlook_create_draft";
+    });
+    if (!supported)
+      throw new Error(
+        "No supported connected reply tool. Saved text/copy remains available; no connector setup was attempted.",
+      );
+    const prompt = replyPrompt(item, canonical("message"));
+    const current = new ReplyJob(
+      store(),
+      item,
+      ctx.sessionManager.getSessionId(),
+    );
+    job = current;
+    returnToQueue = {
+      id: randomUUID(),
+      sessionId: current.sessionId,
+      prompt,
+      revoked: false,
+    };
+    try {
+      activateTools(replyTool);
+      sendSelectedAction(prompt);
+    } catch (error) {
+      current.finish();
+      job = undefined;
+      returnToQueue = undefined;
+      deactivateTools([replyTool]);
       throw error;
     }
   }
@@ -723,7 +969,8 @@ export default async function comms(pi: ExtensionAPI) {
     let memory = demoState();
     let view: ViewState =
       demo || initialView === 2 ? { view: initialView, search: "" } : savedView;
-    let notice = "";
+    let notice = demo ? "" : queueNotice;
+    if (!demo) queueNotice = "";
     const read = () => (demo ? structuredClone(memory) : store().read());
     const update = (change: (state: State) => void) => {
       if (demo) change(memory);
@@ -991,6 +1238,7 @@ export default async function comms(pi: ExtensionAPI) {
       }
       if (!choice || !active) return;
       view = choice.view;
+      if (!demo) savedView = view;
       try {
         if (demo)
           throw new Error(
@@ -1000,6 +1248,7 @@ export default async function comms(pi: ExtensionAPI) {
         else {
           const item = currentItem(choice.item);
           if (choice.action === "draft-ai") startDraft(ctx, item);
+          else if (choice.action === "handoff") startReply(ctx, item);
           else {
             canStart(ctx);
             if (choice.action === "integrate-notes") {
@@ -1025,16 +1274,11 @@ export default async function comms(pi: ExtensionAPI) {
               );
               return;
             }
-            const meeting = choice.action === "integrate-meeting";
             ctx.ui.setEditorText(
-              meeting
-                ? meetingRequest(item, canonical("paste-meetings"))
-                : messageRequest(item, canonical("message")),
+              meetingRequest(item, canonical("paste-meetings")),
             );
             ctx.ui.notify(
-              meeting
-                ? "Meeting integration placed in your prompt. Submit to review proposed notes and reminders. Filing still requires your confirmation."
-                : "Reviewed reply placed in your prompt. Submit to run the existing message workflow. Mail stays draft-only; Teams asks before sending.",
+              "Meeting integration placed in your prompt. Submit to review proposed notes and reminders. Filing still requires your confirmation.",
               "info",
             );
           }
@@ -1053,7 +1297,19 @@ export default async function comms(pi: ExtensionAPI) {
         ctx.ui.notify("/comms needs Pi's interactive terminal UI.", "warning");
         return;
       }
-      const command = args.trim().replace(/\s+/g, " ");
+      let command = args.trim().replace(/\s+/g, " ");
+      if (command.startsWith("return ")) {
+        const back = queuedReturn;
+        queuedReturn = undefined;
+        if (
+          !back ||
+          command !== `return ${back.id}` ||
+          !safeReturn(ctx, back.sessionId)
+        )
+          return;
+        queueNotice = back.notice || "";
+        command = "";
+      } else if (returnToQueue || queuedReturn) revokeReply();
       if (["help", "-h", "--help"].includes(command)) {
         ctx.ui.notify(commandHelp, "info");
         return;

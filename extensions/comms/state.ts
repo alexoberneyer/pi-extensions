@@ -22,6 +22,7 @@ export type Candidate = {
   summary: string;
   uncertainty?: string;
   suggestion: string;
+  proposedReply?: string;
   priority: number;
   url?: string;
 };
@@ -32,7 +33,7 @@ export type Resolution = {
   evidenceAt: string;
   reason: string;
 };
-export type Item = Candidate & {
+export type Item = Omit<Candidate, "proposedReply"> & {
   key: string;
   source: Source;
   account: string;
@@ -118,6 +119,12 @@ export function validateCandidate(
     (typeof value.uncertainty !== "string" || value.uncertainty.length > 2000)
   )
     throw new Error("Invalid item uncertainty.");
+  if (
+    value.proposedReply !== undefined &&
+    (typeof value.proposedReply !== "string" ||
+      value.proposedReply.length > 20000)
+  )
+    throw new Error("Invalid item proposedReply (maximum 20,000 characters).");
   if (![1, 2, 3].includes(value.priority))
     throw new Error("Priority must be 1, 2 or 3.");
   if (
@@ -145,6 +152,9 @@ export function validateCandidate(
       ? { uncertainty: clean(value.uncertainty, 2000).trim() }
       : {}),
     suggestion: clean(value.suggestion, 2000),
+    ...(value.proposedReply !== undefined
+      ? { proposedReply: clean(value.proposedReply, 20000).trim() }
+      : {}),
     priority: value.priority,
     ...(value.url ? { url: clean(value.url, 4000) } : {}),
   };
@@ -361,9 +371,35 @@ export function ingest(
     delete current.snoozedUntil;
     current.draftRevision++;
   }
-  for (const candidate of candidates) {
+  for (const collected of candidates) {
+    // A proposal is transient collector input, never a second saved reply.
+    const { proposedReply, ...candidate } = collected;
     const key = identity(source, account, candidate.sourceId);
     const current = state.items.find((item) => item.key === key);
+    const expected = snapshot?.items.find((item) => item.key === key);
+    // Preserve concurrent local edits/status, but never discard newer provider
+    // evidence or leave a concurrently edited reply looking fresh against it.
+    if (snapshot && !isDeepStrictEqual(current, expected)) {
+      if (
+        current &&
+        Date.parse(candidate.sourceUpdatedAt) >
+          Date.parse(current.sourceUpdatedAt)
+      ) {
+        delete current.uncertainty;
+        Object.assign(current, candidate);
+        delete current.resolution;
+        current.draftStale = current.draftStale || Boolean(current.draft);
+        current.draftRevision++;
+      }
+      continue;
+    }
+    const draft =
+      (source === "mail" || source === "teams") &&
+      account !== "unverified" &&
+      !candidate.uncertainty &&
+      !newerCoverage
+        ? proposedReply || ""
+        : "";
     if (!current) {
       state.items.push({
         ...candidate,
@@ -371,8 +407,8 @@ export function ingest(
         source,
         account,
         status: "open",
-        draft: "",
-        draftRevision: 0,
+        draft,
+        draftRevision: draft ? 1 : 0,
         draftStale: false,
       });
       continue;
@@ -381,6 +417,17 @@ export function ingest(
       Date.parse(candidate.sourceUpdatedAt) -
       Date.parse(current.sourceUpdatedAt);
     if (delta < 0) continue;
+    // Revision zero is deliberately conservative: a saved empty draft may
+    // have been cleared by the user. Existing items also require a snapshot.
+    const seedDraft =
+      draft &&
+      snapshot &&
+      current.status === "open" &&
+      !current.snoozedUntil &&
+      !current.reminderAdded &&
+      current.draft === "" &&
+      current.draftRevision === 0 &&
+      !current.draftStale;
     // A refreshed assessment replaces prior uncertainty, including clearing it.
     delete current.uncertainty;
     Object.assign(current, candidate);
@@ -388,8 +435,12 @@ export function ingest(
       delete current.resolution;
       current.status = "open";
       delete current.snoozedUntil;
-      current.draftStale = Boolean(current.draft);
+      current.draftStale = current.draftStale || Boolean(current.draft);
       // Invalidate an editor or AI draft opened against the old source context.
+      current.draftRevision++;
+    }
+    if (seedDraft) {
+      current.draft = draft;
       current.draftRevision++;
     }
   }

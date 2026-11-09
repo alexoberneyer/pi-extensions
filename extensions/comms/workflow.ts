@@ -98,6 +98,11 @@ export function snoozeUntil(now = new Date()): string {
   }
   return new Date(stamp).toISOString();
 }
+export function triageDraftingInstructions(): string {
+  return `- Always include a concrete suggested action in suggestion, even when no reply is ready.
+- Optionally include proposedReply ONLY for grounded, reply-ready mail or teams items in a verified account. Verify the exact thread and recipient and complete all relevant checks first: no identified missing checks or uncertainty, no user decision needed. Do not invent facts, deadlines or commitments, or choose an answer on my behalf.
+- proposedReply is plain text, at most 20,000 characters, in the original language and my terse voice. It is a LOCAL unsent proposal for review, never permission to send or create a remote draft, and never completion evidence. Do not copy or replace saved local drafts. Otherwise omit proposedReply and explain the blocker in suggestion/uncertainty; never hide missing checks to make an item look reply-ready.`;
+}
 export function refreshPrompt(
   runId: string,
   startedAt: string,
@@ -117,7 +122,8 @@ Read the canonical instructions at ${JSON.stringify(file)} for my priorities, no
 - In comms_ingest, return resolutions with the original sourceId and sourceUpdatedAt, the stable evidenceId and provider evidenceAt of the reply/completion you actually read, and a short reason why it fully addresses the SAME request with no outstanding promise. Evidence must be at or before the collection upper bound. Partial coverage may resolve individually verified requests in a verified account, but unavailable/unverified sources cannot. An unrelated reply, missing item or an unsent draft is not completion. Never merely omit an answered retained request or record closure only in coverage detail. Do not return the same request in both items and resolutions. Omit resolutions or use [] when none are verified.
 - Read comms_snapshot to cross-check retained items. Identify each request by its stable provider message/task ID, not an invented title or timestamp. Use the real source last-modified time, not poll time. Include the conversation URL when available. Reuse the original request ID when refreshing an existing item. Keep distinct asks separate.
 - Call comms_ingest ONCE per source/account with ALL actionable candidates, not just the top three. Up to 1000 per result. Use complete only after all pages and the account identity are verified. Use partial/unavailable otherwise. Never mark unresolved items done based on absence from this window. Keep mail and Teams account identities explicit (email or stable tenant/user ID). For an unavailable source with unknown identity use account "unverified".
-- Suggest concrete next moves, but leave message generation to the selected item's Draft action. Priority 1 means needs attention soon, 2 normal, 3 can wait.
+- Priority 1 means needs attention soon, 2 normal, 3 can wait.
+${triageDraftingInstructions()}
 - Keep summary to the request and verified context. Put missing checks, uncertain ownership and unverified replies in uncertainty, omitting it only when no uncertainty is identified. Do not treat a reply not found as proof that no reply was sent. Preserve unresolved uncertainty from retained requests. Start suggestion with one immediate action, then put any conditional follow-up in a separate paragraph. Use absolute dates for deadlines rather than stale phrases such as "today or tomorrow".
 ${meetingCollectionPrompt(meetings)}
 Finish with at most three priorities, source failures, and "Open /comms to review". Do not create a Markdown task list or log file.`;

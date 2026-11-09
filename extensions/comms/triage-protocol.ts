@@ -1,5 +1,5 @@
 import { readConfig } from "../../lib/config.mjs";
-import { identityContext } from "./workflow.ts";
+import { identityContext, triageDraftingInstructions } from "./workflow.ts";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { meetingCollectionPrompt } from "./meetings.ts";
@@ -35,6 +35,13 @@ export const candidateSchema = Type.Object({
     }),
   ),
   suggestion: Type.String({ maxLength: 2000 }),
+  proposedReply: Type.Optional(
+    Type.String({
+      maxLength: 20000,
+      description:
+        "Optional local plain-text reply for verified mail/teams only, with all checks complete, no uncertainty or user decision, and no invented facts or commitments",
+    }),
+  ),
   priority: Type.Integer({ minimum: 1, maximum: 3 }),
   url: Type.Optional(Type.String({ maxLength: 4000 })),
 });
@@ -313,7 +320,8 @@ The canonical triage instructions below supply priorities, noise filters, option
 - Page each source completely. Report partial when limits, missing permissions or search-index lag leave coverage uncertain. Prefer direct Teams chat reads using teams_list_chats then read_resource to the search index. Report all five sources (mail, teams, calendar, notion tickets, meetings), including unavailable ones. If auth fails, report what failed instead of pretending an empty inbox.
 - Match exact outstanding requests. A later unrelated message or my unrelated reply does not close a request. Preserve outstanding promises. Keep distinct asks separate, using stable provider IDs and real source last-modified timestamps, not collection time. Reuse original IDs for retained requests.
 - For retained requests demonstrably completed, return resolutions with the original sourceId and sourceUpdatedAt, the stable evidenceId and provider evidenceAt of the reply/completion you actually read, and a short reason. Evidence must be at or before run start. Explain why it fully addresses the SAME request and leaves no outstanding promise. Partial coverage may resolve individually verified requests in a verified account, but unavailable/unverified sources cannot. An unrelated reply, missing request or an unsent draft is not completion. Never merely omit an answered retained request or put its closure only in coverage detail. Do not return the same request in both items and resolutions. Omit resolutions or use [] when none are verified.
-- Return ALL actionable candidates, not just the top three, at most 1000 per source/account. Each request ID must occur only once within its source/account. Never use one conversation ID for distinct requests. Include HTTPS conversation links when available. Priority 1 needs attention soon, 2 normal, 3 can wait. Suggest concrete next actions without drafting replies or inventing commitments.
+- Return ALL actionable candidates, not just the top three, at most 1000 per source/account. Each request ID must occur only once within its source/account. Never use one conversation ID for distinct requests. Include HTTPS conversation links when available. Priority 1 needs attention soon, 2 normal, 3 can wait.
+${triageDraftingInstructions()}
 - Keep summary to the request and verified context. Put missing checks, uncertain ownership and unverified replies in uncertainty, omitting it only when no uncertainty is identified. Do not treat a reply not found as proof that no reply was sent. Preserve unresolved uncertainty from retained requests. Start suggestion with one immediate action, then put any conditional follow-up in a separate paragraph. Use absolute dates for deadlines rather than stale phrases such as "today or tomorrow".
 - Return the requested structured object with this runId and one results entry per source/account. Complete means identity verified AND all pages exhausted. Unknown identity must use account "unverified" and status unavailable. Never infer resolution from absence. No prose or Markdown task/log files.
 Canonical instructions (only the filtering and calendar rules apply):

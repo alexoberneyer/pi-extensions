@@ -1088,6 +1088,7 @@ async function externalHarness(t, behavior = {}) {
     activeTools = [...names];
   };
   loaded.runtime.sendUserMessage = (text) => prompts.push(text);
+  loaded.runtime.sendMessage = (message) => prompts.push(message.content);
   loaded.runtime.getAllTools = () => [];
   const manager = SessionManager.inMemory(notes);
   loaded.runtime.appendEntry = (type, data) =>

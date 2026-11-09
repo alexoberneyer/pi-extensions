@@ -559,7 +559,7 @@ test("metadata expands on request, stays readable after resize and resets for an
   key(h.view, "\r", "i");
   const expanded = screen(h.view);
   assert.match(expanded, /Account: demo@example.invalid/);
-  assert.match(expanded, /Local status: open · draft · Priority 1/);
+  assert.match(expanded, /Local status: open · draft ready · Priority 1/);
   assert.match(expanded, /Source updated: 2026-10-18T10:00:00.000Z/);
   assert.ok(
     expanded
@@ -1087,7 +1087,7 @@ test("editor listeners are removed after disposal and unsupported hooks fall bac
   assert.match(screen(fallback.view), /Request details/);
 });
 
-test("AI drafting exits explicitly, while demo hides live actions", () => {
+test("AI drafting starts a selected-item job, while demo hides live actions", () => {
   const h = dashboard(demoState(first), 30, { demo: false });
   key(h.view, "\r", "\r");
   selectAction(h.view, "Draft with AI");
@@ -1097,8 +1097,55 @@ test("AI drafting exits explicitly, while demo hides live actions", () => {
   key(demo.view, "\r", "\r");
   assert.doesNotMatch(
     screen(demo.view),
-    /Draft with AI|message workflow|Open original|Add action to Reminders/,
+    /Draft with AI|Review & send reply|Review & create Outlook draft|Open original|Add action to Reminders/,
   );
+});
+
+test("reply-ready items show channel-specific review actions without an editor handoff", () => {
+  for (const source of ["teams", "mail"]) {
+    const state = demoState(first);
+    const item = state.items.find((row) => row.source === source);
+    item.draft = "The current document is the linked version.";
+    const h = dashboard(state, 30, {
+      demo: false,
+      initial: { view: 0, search: item.title },
+    });
+    assert.match(screen(h.view), /draft ready/);
+    key(h.view, "\r", "\r");
+    const label =
+      source === "mail"
+        ? "Review & create Outlook draft"
+        : "Review & send reply";
+    assert.match(screen(h.view), new RegExp(label));
+    selectAction(h.view, label);
+    assert.equal(h.choice().action, "handoff");
+    assert.equal(h.choice().item.key, item.key);
+  }
+});
+
+test("unsafe and non-message items never offer reply delivery", () => {
+  for (const patch of [
+    { draftStale: true },
+    { draft: "   " },
+    { account: "unverified" },
+    { status: "resolved" },
+    { status: "dismissed" },
+    { source: "calendar" },
+    { source: "notion" },
+  ]) {
+    const state = demoState(first);
+    const item = state.items[0];
+    Object.assign(item, patch);
+    const h = dashboard(state, 30, {
+      demo: false,
+      initial: { view: 4, search: item.title },
+    });
+    key(h.view, "\r", "\r");
+    assert.doesNotMatch(
+      screen(h.view),
+      /Review & send reply|Review & create Outlook draft/,
+    );
+  }
 });
 
 test("narrow screens cannot apply hidden editor actions, and disposed views ignore input", async () => {
@@ -1449,6 +1496,7 @@ async function harness(t) {
     activeTools = [...names];
   };
   loaded.runtime.sendUserMessage = (text) => prompts.push(text);
+  loaded.runtime.sendMessage = (message) => prompts.push(message.content);
   loaded.runtime.getAllTools = () => [
     { name: "mcp__fixture__read", annotations: { readOnlyHint: true } },
     { name: "mcp__fixture__send", annotations: { readOnlyHint: false } },
@@ -1568,7 +1616,7 @@ test(
 
 test("Pi's real loader registers the extension, blocks unsolicited ingestion and headless commands", async (t) => {
   const h = await harness(t);
-  assert.equal(h.tools.length, 4);
+  assert.equal(h.tools.length, 5);
   const ingestTool = h.tools.find((tool) => tool.name === "comms_ingest");
   await assert.rejects(
     () => ingestTool.execute("x", { runId: "invented" }),

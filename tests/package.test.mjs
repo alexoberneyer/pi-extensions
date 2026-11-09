@@ -196,6 +196,7 @@ test("all declared extensions load and start with isolated defaults, without ext
     }
     const queue = tools.filter((tool) => tool.name.startsWith("comms_"));
     assert.deepEqual(queue.map((tool) => tool.name).sort(), [
+      "comms_deliver_reply",
       "comms_ingest",
       "comms_save_capture",
       "comms_save_draft",

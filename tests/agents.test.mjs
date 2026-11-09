@@ -511,6 +511,341 @@ test("Needs-you rows precede idle current Pi without changing project grouping o
   assert.equal(view.selectedRow().key, "stopped");
 });
 
+test("Needs you ranks globally across projects and hosts with oldest known activity first", () => {
+  const rows = [
+    row({
+      key: "current",
+      title: "Current prompt",
+      status: "waiting",
+      current: true,
+      updated: 30,
+    }),
+    row({ key: "error", title: "Local failure", status: "error", updated: 1 }),
+    row({
+      key: "stopped",
+      title: "Stopped run",
+      status: "stopped",
+      updated: 1,
+    }),
+    row({
+      key: "b",
+      title: "Other prompt B",
+      status: "waiting",
+      cwd: "/alpha",
+      updated: 20,
+    }),
+    row({
+      key: "a",
+      title: "Other prompt A",
+      status: "waiting",
+      cwd: "/zeta",
+      updated: 20,
+    }),
+    row({
+      key: "remote",
+      title: "Remote prompt",
+      source: "codex",
+      host: "dev01",
+      cwd: "/srv/fixture",
+      status: "waiting",
+      updated: 10,
+    }),
+    row({
+      key: "missing",
+      title: "Undated prompt",
+      source: "claude",
+      status: "waiting",
+      updated: 0,
+    }),
+    row({ key: "idle", title: "Parked run", status: "ready" }),
+    row({ key: "unknown", title: "Unavailable run", status: "unknown" }),
+  ];
+  const { view } = makeDashboard(rows);
+  assert.equal(view.selectedRow().key, "current");
+  view.handleInput("\t");
+  assert.equal(view.selectedRow().key, "remote");
+  const lines = view.render(140).map(stripTerminalSequences);
+  const table = lines.filter((line) => /[●○] \[/.test(line));
+  assert.deepEqual(
+    table.map((line) => rows.find((agent) => line.includes(agent.title))?.key),
+    ["remote", "a", "b", "current", "missing", "error", "stopped"],
+  );
+  assert.match(lines[4], /Project\s+Reason/);
+  assert.match(table[0], /\/srv\/fixture\s+Input or approval/);
+  assert.match(
+    table.find((line) => line.includes("Undated prompt")),
+    /n\/a/,
+  );
+  assert.match(
+    table.find((line) => line.includes("Local failure")),
+    /Error reported/,
+  );
+  assert.match(
+    table.find((line) => line.includes("Stopped run")),
+    /Run stopped/,
+  );
+  assert.equal(
+    lines.slice(5, -8).filter((line) => line.trim()).length,
+    table.length,
+  );
+  assert.match(lines.join("\n"), /Oldest known activity first/);
+});
+
+test("Needs you still respects explicit project, tool and search filters", () => {
+  const rows = [
+    row({ key: "pi", title: "Local prompt", status: "waiting", updated: 30 }),
+    row({
+      key: "claude",
+      source: "claude",
+      title: "Local failure",
+      status: "error",
+      updated: 20,
+    }),
+    row({
+      key: "other",
+      title: "Other prompt",
+      cwd: "/other",
+      status: "waiting",
+      updated: 10,
+    }),
+    row({
+      key: "remote",
+      title: "Remote prompt",
+      host: "dev01",
+      status: "waiting",
+      updated: 1,
+    }),
+  ];
+  const { view } = makeDashboard(rows, { filter: 1 });
+  const table = () =>
+    view
+      .render(140)
+      .map(stripTerminalSequences)
+      .filter((line) => /[●○] \[/.test(line))
+      .join("\n");
+  assert.match(table(), /Remote prompt/);
+  view.handleInput("\x10");
+  assert.doesNotMatch(table(), /Remote prompt|Other prompt/);
+  assert.match(table(), /Local failure/);
+  view.handleInput("\x0f");
+  assert.doesNotMatch(table(), /Local failure/);
+  assert.match(table(), /Local prompt/);
+  view.handleInput("absent");
+  assert.equal(view.selectedRow(), undefined);
+  assert.match(view.render(140)[1], /Needs you 1/);
+  view.handleInput("\x1b");
+  assert.equal(view.selectedRow().key, "pi");
+});
+
+test("Needs you preserves the selected identity across ranking updates and requires reselection if it leaves", async () => {
+  const opened = [];
+  const agent = (key, updated) =>
+    row({
+      source: "claude",
+      key,
+      title: `${key} prompt`,
+      status: "waiting",
+      updated,
+      tmux: {
+        socket: "/tmp/attention.sock",
+        session: "$1",
+        pane: `%${updated}`,
+      },
+    });
+  const a = agent("a", 1);
+  const b = agent("b", 2);
+  const c = agent("c", 3);
+  const { view } = makeDashboard([a, b], {
+    filter: 1,
+    opener: async (target) => {
+      opened.push(target);
+    },
+  });
+  view.handleInput("\x1b[B");
+  assert.equal(view.selectedRow().key, "b");
+  view.setData([c, { ...b, status: "error" }, a]);
+  assert.equal(view.selectedRow().key, "b");
+  view.handleInput("\r");
+  await tick();
+  assert.deepEqual(opened, [b.tmux]);
+  view.setData([c, { ...a, status: "working" }]);
+  assert.equal(view.selectedRow(), undefined);
+  assert.match(view.render(140).join("\n"), /Selected session left Needs you/);
+  view.handleInput("\r");
+  await tick();
+  assert.equal(opened.length, 1);
+  view.setData([b, c]);
+  assert.equal(view.selectedRow(), undefined);
+  view.handleInput("\r");
+  await tick();
+  assert.equal(opened.length, 1);
+  view.setData([c]);
+  assert.equal(view.selectedRow(), undefined);
+  view.handleInput("\x1b[B");
+  assert.equal(view.selectedRow().key, "c");
+  assert.doesNotMatch(
+    view.render(140).join("\n"),
+    /Selected session left Needs you/,
+  );
+});
+
+test("a pending attach cannot restore a lost Needs you selection when the session reappears", async () => {
+  let finish;
+  let opened = 0;
+  const agent = row({
+    key: "pending",
+    source: "claude",
+    status: "waiting",
+    tmux: { socket: "/tmp/attention.sock", session: "$1", pane: "%1" },
+  });
+  const { view } = makeDashboard([agent], {
+    filter: 1,
+    opener: () => {
+      opened++;
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    },
+    closer: async () => assert.fail("No pane should be closed"),
+  });
+  view.handleInput("\r");
+  await tick();
+  view.setData([]);
+  view.setData([agent]);
+  assert.equal(view.selectedRow(), undefined);
+  finish();
+  await tick();
+  assert.equal(view.selectedRow(), undefined);
+  view.handleInput("\r");
+  await tick();
+  assert.equal(opened, 1);
+  view.handleInput("\x18");
+  assert.doesNotMatch(view.render(140).join("\n"), /Close tmux pane\?/);
+});
+
+test("Needs you keeps project context and reasons in narrow and compact layouts", () => {
+  const { view, terminal } = makeDashboard(
+    [
+      row({
+        key: "prompt",
+        title: "Review changes",
+        cwd: "/other",
+        status: "waiting",
+        preview: "Approve the synthetic change?",
+      }),
+    ],
+    { filter: 1 },
+  );
+  const narrow = view.render(70).map(stripTerminalSequences).join("\n");
+  assert.match(narrow, /\/other/);
+  assert.match(narrow, /Input or approval/);
+  assert.match(narrow, /Approve the synthetic change\?/);
+  terminal.rows = 12;
+  const compact = view.render(80).map(stripTerminalSequences).join("\n");
+  assert.match(compact, /Input or approval/);
+  assert.match(compact, /\/other/);
+  assert.match(compact, /Needs you/);
+});
+
+test("Needs you keeps local and remote titles visible beside long project paths", () => {
+  const cwd = "/fixture/" + "long-project-path/".repeat(20);
+  for (const source of ["pi", "claude", "codex"]) {
+    for (const host of [undefined, "dev01"]) {
+      const rows = [
+        row({
+          key: "alpha",
+          title: "Task alpha",
+          cwd,
+          source,
+          host,
+          status: "waiting",
+          updated: 1,
+        }),
+        row({
+          key: "beta",
+          title: "Task beta",
+          cwd,
+          source,
+          host,
+          status: "waiting",
+          updated: 2,
+        }),
+      ];
+      const { view, terminal } = makeDashboard(rows, { filter: 1 });
+      for (const width of [60, 70, 80, 102]) {
+        terminal.rows = 30;
+        const lines = view.render(width).map(stripTerminalSequences);
+        const table = lines.filter((line) => /[●○] \[/.test(line)).join("\n");
+        assert.match(table, /Task alpha/, `${source} ${host} at ${width}`);
+        assert.match(table, /Task beta/, `${source} ${host} at ${width}`);
+        assert.match(
+          lines.find(
+            (line) =>
+              line.includes("Input or approval") && !/[●○] \[/.test(line),
+          ),
+          /Task alpha/,
+        );
+        assert.match(lines.join("\n"), /\/fixture\//);
+        terminal.rows = 12;
+        assert.match(
+          view.render(width).map(stripTerminalSequences).join("\n"),
+          /Task alpha/,
+        );
+      }
+    }
+  }
+});
+
+test("narrow Needs you scrolling keeps the selected conversation and its project together", () => {
+  const rows = Array.from({ length: 6 }, (_, index) =>
+    row({
+      key: `queue-${index}`,
+      title: `Task ${index}`,
+      cwd: `/fixture/project-${index}`,
+      status: "waiting",
+      updated: index + 1,
+    }),
+  );
+  const { view } = makeDashboard(rows, { filter: 1, height: 18 });
+  for (const agent of rows) {
+    assert.equal(view.selectedRow().key, agent.key);
+    const body = view
+      .render(70)
+      .map(stripTerminalSequences)
+      .slice(5, -8)
+      .join("\n");
+    assert.ok(body.includes(agent.title));
+    assert.ok(body.includes(agent.cwd));
+    view.handleInput("\x1b[B");
+  }
+});
+
+test("Needs you stays within terminal bounds with wide text and project paths", () => {
+  const { view, terminal } = makeDashboard(
+    [
+      row({
+        title: "中文 🥋 ".repeat(50),
+        cwd: `/fixture/${"中文/".repeat(30)}`,
+        preview: "Question ".repeat(100),
+        status: "waiting",
+      }),
+    ],
+    { filter: 1 },
+  );
+  view.focused = true;
+  for (const width of [1, 2, 12, 35, 38, 55, 58, 70, 80, 82, 102, 140, 220]) {
+    for (const height of [4, 12, 14, 18, 40]) {
+      terminal.rows = height;
+      const lines = view.render(width);
+      assert.equal(lines.length, height);
+      assert.ok(
+        lines.every((line) => visibleWidth(line) <= width),
+        `overflow at ${width}x${height}`,
+      );
+    }
+  }
+});
+
 test("wide layouts keep metadata near titles and show full unavailable state with n/a activity", () => {
   const { view } = makeDashboard([
     row({

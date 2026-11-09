@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Make Agents' Needs you view a global attention queue with project context and explicit reasons.
+- Keep queue selection stable during refresh and require reselection when the selected session leaves.
+
 ## [0.1.0] · 2026-11-06
 
 - Extract all ten extensions and their required helpers into one Pi package.

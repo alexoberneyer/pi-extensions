@@ -30,6 +30,12 @@ The package's `ws` dependency supports Codex's existing local socket transport. 
 
 Native command strings are only copied, never executed by selecting an external row. Attachment uses structured socket/session/pane identities. Closing a pane is abrupt and can interrupt running work. Saved history is not deleted.
 
+## Attention queue
+
+Tab to Needs you for a flat queue across projects and local/remote hosts. Input or approval comes first, then reported errors, then stopped runs. Within each reason, oldest known activity comes first. Missing activity times stay `n/a` and sort last within that reason. Activity time is not a measured waiting duration. Explicit project, tool and search filters still apply. Sessions and the other views keep their project groups.
+
+Each queue row shows its project and attention reason. Entering Needs you selects the first ranked row. Refreshes preserve the selected session, even when its rank changes. If it leaves the queue, select another row before Enter can act. Browsing adds no model calls or priority scores. Idle still means idle, not verified completion or unread results.
+
 ## Discovery
 
 - Pi uses its private presence registry and native session metadata. Other tracked live Pi processes cannot have their conversation resumed here, even if idle.

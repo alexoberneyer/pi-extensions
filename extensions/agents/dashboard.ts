@@ -59,6 +59,11 @@ const priority = {
   unknown: 5,
   inactive: 6,
 };
+const attentionReasons: Partial<Record<AgentRow["status"], string>> = {
+  waiting: "Input or approval",
+  error: "Error reported",
+  stopped: "Run stopped",
+};
 const colors = {
   waiting: "warning",
   working: "accent",
@@ -132,6 +137,7 @@ export class Dashboard implements Component, Focusable {
   private rows: AgentRow[] = [];
   private visible: AgentRow[] = [];
   private selected?: string;
+  private selectionMissing = false;
   private filter = 0;
   private projectOnly = false;
   private sourceIndex = 0;
@@ -290,7 +296,10 @@ export class Dashboard implements Component, Focusable {
       .finally(() => {
         if (this.attachAbort === controller) this.attachAbort = undefined;
         if (this.disposed) return;
-        if (this.visible.some((row) => row.key === selected))
+        if (
+          !this.selectionMissing &&
+          this.visible.some((row) => row.key === selected)
+        )
           this.selected = selected;
         this.refresh();
         this.tui.requestRender();
@@ -464,7 +473,7 @@ export class Dashboard implements Component, Focusable {
     if (this.disposed) return;
     this.rows = rows;
     this.loading = loading;
-    this.refilter();
+    this.refilter(this.filter === 1);
     this.tui.requestRender();
   }
 
@@ -526,7 +535,7 @@ export class Dashboard implements Component, Focusable {
     return `Enter: ${enterLabels[action]}${detail ? ` · ${plain(detail)}` : ""}`;
   }
 
-  private refilter(): void {
+  private refilter(preserveMissingSelection = false): void {
     this.visible = filterRows(
       this.rows,
       this.filter,
@@ -534,6 +543,13 @@ export class Dashboard implements Component, Focusable {
       this.projectOnly ? this.cwd : undefined,
       this.sourceOptions[this.sourceIndex],
     ).sort((a, b) => {
+      if (this.filter === 1)
+        return (
+          priority[a.status] - priority[b.status] ||
+          Number(!a.updated) - Number(!b.updated) ||
+          a.updated - b.updated ||
+          a.key.localeCompare(b.key)
+        );
       if (a.host !== b.host) return (a.host || "").localeCompare(b.host || "");
       if (a.cwd !== b.cwd) {
         if (a.cwd === this.cwd) return -1;
@@ -547,9 +563,23 @@ export class Dashboard implements Component, Focusable {
         a.key.localeCompare(b.key)
       );
     });
+    if (!preserveMissingSelection && this.selectionMissing) {
+      this.selectionMissing = false;
+      this.notice = "";
+    }
+    if (this.selectionMissing) return;
     if (!this.visible.some((row) => row.key === this.selected)) {
+      if (preserveMissingSelection && this.selected) {
+        this.selected = undefined;
+        this.selectionMissing = true;
+        this.notice = "Selected session left Needs you. Choose another row.";
+        return;
+      }
       this.selected =
-        this.visible.find((row) => row.current)?.key ?? this.visible[0]?.key;
+        this.filter === 1
+          ? this.visible[0]?.key
+          : (this.visible.find((row) => row.current)?.key ??
+            this.visible[0]?.key);
       this.scroll = 0;
     }
   }
@@ -600,6 +630,7 @@ export class Dashboard implements Component, Focusable {
       this.filter =
         (this.filter + (matchesKey(data, "tab") ? 1 : filters.length - 1)) %
         filters.length;
+      if (this.filter === 1) this.selected = undefined;
       this.notice = "";
       this.refilter();
     } else if (matchesKey(data, "ctrl+p")) {
@@ -657,6 +688,7 @@ export class Dashboard implements Component, Focusable {
       else if (this.keys.matches(data, "tui.select.pageDown"))
         offset = this.pageSize;
       if (offset) {
+        this.selectionMissing = false;
         const index = this.visible.findIndex(
           (row) => row.key === this.selected,
         );
@@ -680,6 +712,9 @@ export class Dashboard implements Component, Focusable {
     const w = Math.max(1, Math.min(CONTENT_WIDTH, width - 2));
     const th = this.theme;
     const row = this.selectedRow();
+    const attention = this.filter === 1;
+    const statusLabel = (agent: AgentRow) =>
+      (attention && attentionReasons[agent.status]) || statuses[agent.status];
     const fit = (text: string) => truncateToWidth(text, w);
     const pad = (text: string, columns: number) => {
       const clipped = truncateToWidth(text, Math.max(0, columns));
@@ -717,8 +752,13 @@ export class Dashboard implements Component, Focusable {
           th.fg("accent", `${filters[this.filter]} · Tab filter`),
           ...this.input.render(w),
           row
-            ? `[${sourceLabel(row)}] ${row.title} · ${statuses[row.status]}`
+            ? attention
+              ? `${statusLabel(row)} · ${row.title}`
+              : `[${sourceLabel(row)}] ${row.title} · ${statuses[row.status]}`
             : "No matching sessions",
+          ...(attention && row
+            ? [th.fg("dim", `[${sourceLabel(row)}] ${projectLabel(row)}`)]
+            : []),
           th.fg("dim", this.actionLabel(row)),
           th.fg("dim", row ? connectionLabel(row) : ""),
           this.notice ||
@@ -744,20 +784,24 @@ export class Dashboard implements Component, Focusable {
     ];
     const statusWidth = 18;
     const metadata = w >= 56 ? statusWidth + 8 : w >= 36 ? statusWidth : 0;
-    const titleWidth = w - metadata;
+    const projectWidth = attention && w >= 80 ? 26 : 0;
+    const titleWidth = w - metadata - projectWidth;
     lines.push(
       th.fg(
         "dim",
         pad("   Conversation", titleWidth) +
-          (metadata ? pad("Status", statusWidth) : "") +
+          (projectWidth ? pad("Project", projectWidth) : "") +
+          (metadata ? pad(attention ? "Reason" : "Status", statusWidth) : "") +
           (metadata > statusWidth ? pad("Updated", 8) : ""),
       ),
     );
 
-    const items: Array<{ heading: string } | { agent: AgentRow }> = [];
+    const items: Array<
+      { heading: string } | { agent: AgentRow } | { project: AgentRow }
+    > = [];
     let previousProject: string | undefined;
     for (const agent of this.visible) {
-      if (projectKey(agent) !== previousProject) {
+      if (!attention && projectKey(agent) !== previousProject) {
         const count = this.visible.filter(
           (candidate) => projectKey(candidate) === projectKey(agent),
         ).length;
@@ -765,16 +809,23 @@ export class Dashboard implements Component, Focusable {
         previousProject = projectKey(agent);
       }
       items.push({ agent });
+      if (attention && !projectWidth) items.push({ project: agent });
     }
     const bodyHeight = Math.max(1, height - 13);
-    this.pageSize = Math.max(1, bodyHeight - 1);
+    this.pageSize = Math.max(
+      1,
+      attention && !projectWidth ? Math.floor(bodyHeight / 2) : bodyHeight - 1,
+    );
     const selectedIndex = items.findIndex(
       (item) => "agent" in item && item.agent.key === this.selected,
     );
-    if (selectedIndex >= this.scroll + bodyHeight)
-      this.scroll = selectedIndex - bodyHeight + 1;
-    if (selectedIndex >= 0 && selectedIndex < this.scroll + 1)
-      this.scroll = Math.max(0, selectedIndex - 1);
+    const trailingProject =
+      attention && !projectWidth && bodyHeight > 1 ? 1 : 0;
+    const leadingMargin = attention ? 0 : 1;
+    if (selectedIndex >= this.scroll + bodyHeight - trailingProject)
+      this.scroll = selectedIndex - bodyHeight + 1 + trailingProject;
+    if (selectedIndex >= 0 && selectedIndex < this.scroll + leadingMargin)
+      this.scroll = Math.max(0, selectedIndex - leadingMargin);
     this.scroll = Math.min(this.scroll, Math.max(0, items.length - bodyHeight));
     for (let i = 0; i < bodyHeight; i++) {
       const item = items[this.scroll + i];
@@ -784,6 +835,8 @@ export class Dashboard implements Component, Focusable {
         );
       } else if ("heading" in item) {
         lines.push(th.fg("dim", fit(item.heading)));
+      } else if ("project" in item) {
+        lines.push(th.fg("dim", fit(`   ${projectLabel(item.project)}`)));
       } else {
         const agent = item.agent;
         const selected = agent.key === this.selected;
@@ -793,7 +846,9 @@ export class Dashboard implements Component, Focusable {
         let text = metadata
           ? `${pad(name, titleWidth - 1)} `
           : pad(name, titleWidth);
-        if (metadata) text += pad(statuses[agent.status], statusWidth);
+        if (projectWidth)
+          text += `${pad(projectLabel(agent), projectWidth - 1)} `;
+        if (metadata) text += pad(statusLabel(agent), statusWidth);
         if (metadata > statusWidth)
           text += pad(agent.updated ? age(agent.updated) : "n/a", 8);
         lines.push(
@@ -807,7 +862,11 @@ export class Dashboard implements Component, Focusable {
     lines.push(
       row
         ? th.bold(
-            fit(`${sourceLabel(row)} · ${statuses[row.status]} · ${row.title}`),
+            fit(
+              attention
+                ? `${statusLabel(row)} · ${row.title}`
+                : `${sourceLabel(row)} · ${statuses[row.status]} · ${row.title}`,
+            ),
           )
         : "",
     );
@@ -838,7 +897,9 @@ export class Dashboard implements Component, Focusable {
         fit(
           this.notice ||
             this.loading ||
-            `${this.visible.length} shown · Pi status requires /reload in each Pi instance`,
+            (attention
+              ? `${this.visible.length} shown · Input/approval, errors, stopped · Oldest known activity first`
+              : `${this.visible.length} shown · Pi status requires /reload in each Pi instance`),
         ),
       ),
     );

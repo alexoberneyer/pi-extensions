@@ -12,6 +12,17 @@ export const sources = [...collectionSources, ...legacySources] as const;
 export type CollectionSource = (typeof collectionSources)[number];
 export type Source = (typeof sources)[number];
 export type Status = "open" | "waiting" | "resolved" | "dismissed";
+// The latest disposition only, not history. Waiting and snooze stay unresolved.
+export const decisions = [
+  "next",
+  "drop",
+  "resolve",
+  "answered",
+  "waiting",
+  "snooze",
+  "expired",
+] as const;
+export type Decision = (typeof decisions)[number];
 export type Candidate = {
   sourceId: string;
   sourceUpdatedAt: string;
@@ -42,6 +53,11 @@ export type Item = Omit<Candidate, "proposedReply"> & {
   draftStale: boolean;
   reminderAdded?: string;
   resolution?: Resolution;
+  // Optional lifecycle fields. Legacy items stay undated rather than invented.
+  firstSeenAt?: string;
+  reopenedAt?: string;
+  decision?: Decision;
+  decidedAt?: string;
   // Legacy scratchpad evidence, kept unchanged on old reMarkable items.
   remarkable?: Record<string, unknown>;
 };
@@ -266,7 +282,11 @@ export function validateState(value: State): State {
       !Number.isSafeInteger(item.draftRevision) ||
       item.draftRevision < 0 ||
       typeof item.draftStale !== "boolean" ||
-      (item.snoozedUntil !== undefined && !validDate(item.snoozedUntil))
+      (item.snoozedUntil !== undefined && !validDate(item.snoozedUntil)) ||
+      (["firstSeenAt", "reopenedAt", "decidedAt"] as const).some(
+        (field) => item[field] !== undefined && !validDate(item[field]),
+      ) ||
+      (item.decision !== undefined && !decisions.includes(item.decision))
     )
       throw new Error("Invalid Comms item. The existing file was left intact.");
     if (item.resolution !== undefined) {
@@ -364,6 +384,8 @@ export function ingest(
     }
     current.status = "resolved";
     current.resolution = resolution;
+    current.decision = "answered";
+    current.decidedAt = startedAt;
     delete current.snoozedUntil;
     current.draftRevision++;
   }
@@ -406,6 +428,7 @@ export function ingest(
         draft,
         draftRevision: draft ? 1 : 0,
         draftStale: false,
+        firstSeenAt: startedAt,
       });
       continue;
     }
@@ -428,6 +451,12 @@ export function ingest(
     delete current.uncertainty;
     Object.assign(current, candidate);
     if (delta > 0) {
+      // Newer activity starts a new open cycle on a closed item and ends any
+      // deferral. firstSeenAt is history and stays.
+      if (current.status === "resolved" || current.status === "dismissed")
+        current.reopenedAt = candidate.sourceUpdatedAt;
+      delete current.decision;
+      delete current.decidedAt;
       delete current.resolution;
       current.status = "open";
       delete current.snoozedUntil;
@@ -498,12 +527,7 @@ export function visibleItems(
 ): Item[] {
   return state.items
     .filter((item) => {
-      if (
-        view === "Needs you" &&
-        (item.status !== "open" ||
-          (item.snoozedUntil && Date.parse(item.snoozedUntil) > now))
-      )
-        return false;
+      if (view === "Needs you" && !eligible(item, now)) return false;
       if (
         view === "Drafts" &&
         (!item.draft || ["resolved", "dismissed"].includes(item.status))
@@ -518,9 +542,71 @@ export function visibleItems(
     .sort(
       (a, b) =>
         a.priority - b.priority ||
-        Date.parse(b.sourceUpdatedAt) - Date.parse(a.sourceUpdatedAt) ||
+        activeSince(a) - activeSince(b) ||
         a.key.localeCompare(b.key),
     );
+}
+// Start of the current open cycle. sourceUpdatedAt is only a legacy proxy.
+export function activeSince(item: Item): number {
+  return Date.parse(
+    item.reopenedAt ?? item.firstSeenAt ?? item.sourceUpdatedAt,
+  );
+}
+export function eligible(item: Item, now = Date.now()): boolean {
+  return (
+    item.status === "open" &&
+    !(item.snoozedUntil && Date.parse(item.snoozedUntil) > now)
+  );
+}
+export const needsYouCap = 5;
+export function backlog(items: Item[], now = Date.now()) {
+  const open = items.filter((item) => eligible(item, now));
+  return {
+    eligible: open.length,
+    unresolved: items.filter((item) =>
+      ["open", "waiting"].includes(item.status),
+    ).length,
+    oldestDays: open.length
+      ? Math.max(
+          0,
+          Math.floor((now - Math.min(...open.map(activeSince))) / 86400000),
+        )
+      : 0,
+  };
+}
+// One local disposition. Status and decision always change together.
+export function decide(
+  item: Item,
+  action: "next" | "drop" | "resolve" | "waiting" | "snooze" | "reopen",
+  now = new Date(),
+  snoozedUntil?: string,
+): void {
+  // Status round trips must still invalidate an in-flight assessment.
+  item.draftRevision++;
+  delete item.resolution;
+  delete item.snoozedUntil;
+  if (action === "reopen") {
+    if (item.status === "resolved" || item.status === "dismissed")
+      item.reopenedAt = now.toISOString();
+    item.status = "open";
+    delete item.decision;
+    delete item.decidedAt;
+    return;
+  }
+  item.status =
+    action === "drop"
+      ? "dismissed"
+      : action === "waiting"
+        ? "waiting"
+        : action === "snooze"
+          ? "open"
+          : "resolved";
+  if (action === "snooze") {
+    if (!snoozedUntil) throw new Error("A snooze needs its end time.");
+    item.snoozedUntil = snoozedUntil;
+  }
+  item.decision = action;
+  item.decidedAt = now.toISOString();
 }
 export function demoState(now = new Date().toISOString()): State {
   const state = emptyState();

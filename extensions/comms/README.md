@@ -24,7 +24,18 @@ Then run `/comms demo`. Demo uses disposable, memory-only data. It cannot read t
 | `/comms cancel`     | Stop this session's Claude collector       |
 | `/comms help`       | Show command help                          |
 
-Tab changes views. Enter opens an item and its actions. Ctrl+G shows coverage. Ctrl+L reloads local state. Ctrl+R starts collection, reads Reminders in the Next view, or resets demo fixtures. Escape closes the view. Ctrl+S explicitly saves an edited draft or adds a reviewed reminder.
+| Key   | Effect on the selected item                                                                              |
+| ----- | -------------------------------------------------------------------------------------------------------- |
+| `n`   | Next: edit one line from the suggestion's first sentence. Enter adds it to Reminders and closes the item |
+| `d`   | Drop: dismiss locally. No confirm. Reopen it from All                                                    |
+| `/`   | Search. Esc leaves search and keeps the filter. Esc again clears it                                      |
+| Enter | Details, then every action                                                                               |
+
+Letters act on the selected item. They type into search only after `/`. Next closes the item only if nothing changed while Reminders ran. Otherwise the action stays in Reminders and the item stays open for another look. A legacy meeting or scratchpad review opens its menu instead, because one reminder must not close its other actions.
+
+Tab changes views. Ctrl+G shows coverage. Ctrl+L reloads local state. Ctrl+R starts collection, reads Reminders in the Next view, or resets demo fixtures. Escape closes the view. Ctrl+S saves an edited draft.
+
+Needs you shows at most five eligible items: open and not snoozed, by priority, then oldest first. Deciding one reveals the next. Search and the source filter apply first. The header reads `Needs you 5 of 23 · unresolved 30 · oldest eligible 9 d`. Unresolved counts open and waiting items, snoozed ones included, so deferring work never looks like progress. Age runs from the item's latest reopening, then from when Comms first saw it. Items saved before that was recorded use their source time. ↺ marks an item that reopened because a newer message arrived after you closed it.
 
 ## Reply-ready triage
 

@@ -57,9 +57,13 @@ const {
   clean,
   identity,
   validateState,
+  decide,
+  activeSince,
 } = await jiti.import(join(source, "state.ts"));
 const { Store } = await jiti.import(join(source, "store.ts"));
-const { Dashboard } = await jiti.import(join(source, "dashboard.ts"));
+const { Dashboard, firstSentence } = await jiti.import(
+  join(source, "dashboard.ts"),
+);
 const { sourceUrl, openSourceLink } = await jiti.import(
   join(source, "source-link.ts"),
 );
@@ -793,7 +797,7 @@ test("the table uses available height, highlights selection and keeps the whole 
     "ok",
     first,
   );
-  const h = dashboard(state);
+  const h = dashboard(state, 30, { initial: { view: 4, search: "" } });
   let text = screen(h.view);
   assert.equal((text.match(/Request \d/g) || []).length, 18);
   assert.match(text, /P\s+Source\s+Person\s+Request\s+Local status\s+Updated/);
@@ -825,9 +829,9 @@ test("Next cursor keys preserve task selection and distinguish unloaded, empty a
   screen(h.view);
   key(h.view, "\x1b[B", "\x1b[D");
   assert.match(screen(h.view), /› Second task/);
-  key(h.view, "z");
+  key(h.view, "/", "z");
   assert.match(screen(h.view), /No matches/);
-  key(h.view, "\x1b");
+  key(h.view, "\x1b", "\x1b"); // Leave search, then clear the filter.
   assert.equal(h.choice(), undefined);
   assert.match(screen(h.view), /Second task/);
   const unloaded = dashboard(emptyState(), 30, {
@@ -935,7 +939,11 @@ test("inline editor owns focus, uses Enter for newlines and keeps failed saves i
       throw new Error("Concurrent draft changed");
     },
   });
+  // The list shows no search cursor until / focuses it.
+  assert.ok(h.view.render(120).every((line) => !line.includes(CURSOR_MARKER)));
+  key(h.view, "/");
   assert.ok(h.view.render(120).some((line) => line.includes(CURSOR_MARKER)));
+  key(h.view, "\x1b");
   editDraft(h.view);
   assert.ok(h.view.render(120).some((line) => line.includes(CURSOR_MARKER)));
   key(h.view, "\r", "Extra paragraph", "\x13");
@@ -2093,9 +2101,7 @@ async function waitForScreen(view, pattern) {
   }
   assert.match(screen(view), pattern);
 }
-test("legacy meeting and scratchpad items keep loading with generic actions only", () => {
-  const state = demoState(first);
-  const page = "11111111222233334444555555555555";
+function legacyMeeting(state, page = "11111111222233334444555555555555") {
   const meeting = {
     sourceId: page,
     sourceUpdatedAt: first,
@@ -2113,12 +2119,14 @@ test("legacy meeting and scratchpad items keep loading with generic actions only
     draftRevision: 0,
     draftStale: false,
   };
-  state.items.push(meeting, {
-    ...structuredClone(meeting),
-    sourceId: "a".repeat(32),
-    key: identity("meetings", "demo@example.invalid", "a".repeat(32)),
-    status: "resolved",
-  });
+  state.items.push(meeting);
+  return meeting;
+}
+
+test("legacy meeting and scratchpad items keep loading with generic actions only", () => {
+  const state = demoState(first);
+  const meeting = legacyMeeting(state);
+  legacyMeeting(state, "a".repeat(32)).status = "resolved";
   const scratch = legacyScratch(state);
   assert.equal(validateState(state), state);
   assert.throws(
@@ -2406,6 +2414,8 @@ if (args[0] !== 'run' || args[1] !== ${JSON.stringify(packagePath("helpers", "to
 }
 const behavior = JSON.parse(fs.readFileSync(${JSON.stringify(behavior)}, 'utf8'));
 if (behavior.config) fs.writeFileSync(${JSON.stringify(config)}, JSON.stringify(behavior.config));
+if (behavior.queue) fs.writeFileSync(behavior.queue.file, JSON.stringify(behavior.queue.state));
+if (behavior.lock) fs.writeFileSync(behavior.lock, 'fixture competing writer', { flag: 'wx', mode: 0o600 });
 if (behavior.fail) { console.error('Fixture read unavailable'); process.exit(1); }
 console.log(JSON.stringify(args.length === 4
   ? [{ title: 'Cached task from ' + args[3], due: null }]
@@ -2504,8 +2514,8 @@ test(
         /Reminders Original Actions · save adds one action/,
       );
       key(view, "\x1b", "0", "c", "$", title, "\x13");
-      await waitForScreen(view, /The review remains open/);
-      assert.match(screen(view), /Action is in Reminders Original Actions/);
+      await waitForScreen(view, /Item closed/);
+      assert.match(screen(view), /Added to Original Actions/);
       assert.doesNotMatch(screen(view), /Changed Actions|Later Actions/);
       assert.equal(view.data.reminderList, "Original Actions");
       assert.equal(
@@ -2573,5 +2583,331 @@ test(
       ["Original Actions", "Changed Actions"],
     );
     assert.deepEqual(h.prompts, []);
+  },
+);
+
+test("letters act on the selected item and reach search only after /", async () => {
+  const h = dashboard(demoState(first), 30, { demo: false });
+  key(h.view, "x", "q");
+  assert.equal(h.view.viewState().search, "");
+  key(h.view, "/", "z", "z");
+  assert.equal(h.view.viewState().search, "zz");
+  assert.match(screen(h.view), /No matches/);
+  key(h.view, "\x1b", "n", "d"); // Esc leaves search. No row is selected.
+  assert.equal(h.view.viewState().search, "zz");
+  assert.equal(h.requests.length, 0);
+  key(h.view, "\x1b");
+  assert.equal(h.view.viewState().search, "");
+  assert.equal(h.choice(), undefined);
+  const selected = h.view.viewState().selected;
+  key(h.view, "d");
+  await settled();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].action, "dismiss");
+  assert.equal(h.requests[0].item.key, selected);
+});
+
+test("n opens a one-line Next editor from the first sentence and Enter adds it", async () => {
+  const state = demoState(first);
+  const item = visibleItems(state, "Needs you")[0];
+  item.suggestion =
+    "Review the plan today. Then reply with a decision.\n\nIf blocked, ask for time.";
+  const h = dashboard(state, 30, { demo: false });
+  key(h.view, "n");
+  assert.match(screen(h.view), /save adds one action/);
+  assert.match(screen(h.view), /Enter add/);
+  assert.match(screen(h.view), /Review the plan today\./);
+  assert.doesNotMatch(screen(h.view), /Then reply/);
+  key(h.view, "\r");
+  await settled();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].action, "add-next");
+  assert.equal(h.requests[0].text, "Review the plan today.");
+  assert.equal(h.requests[0].item.key, item.key);
+  assert.equal(firstSentence("No terminator here"), "No terminator here");
+  const demo = dashboard(demoState(first));
+  key(demo.view, "n");
+  assert.match(screen(demo.view), /Demo mode cannot write to Reminders/);
+  assert.equal(demo.requests.length, 0);
+});
+
+test("n on a legacy multi-action review opens its menu instead of closing it", () => {
+  const state = emptyState();
+  legacyMeeting(state);
+  const h = dashboard(state, 30, { demo: false });
+  key(h.view, "n");
+  assert.match(screen(h.view), /Request actions/);
+  assert.match(screen(h.view), /Add action to Reminders/);
+  assert.equal(h.requests.length, 0);
+});
+
+test("Needs you shows the oldest eligible requests per priority after filters, with honest counts", async () => {
+  const state = emptyState();
+  ingest(
+    state,
+    "mail",
+    "a",
+    Array.from({ length: 8 }, (_, i) => ({
+      ...candidate(`r${i}`),
+      priority: i < 6 ? 2 : 1,
+    })),
+    "complete",
+    "ok",
+    first,
+  );
+  state.items.forEach((item, i) => {
+    item.firstSeenAt = new Date(Date.parse(first) + i * 3600000).toISOString();
+  });
+  state.items[3].status = "waiting";
+  state.items[4].snoozedUntil = "2999-01-01T00:00:00.000Z";
+  assert.deepEqual(
+    visibleItems(state, "Needs you", "", Date.parse(second)).map(
+      (item) => item.sourceId,
+    ),
+    ["r6", "r7", "r0", "r1", "r2", "r5"],
+  );
+  const h = dashboard(state, 30, {
+    demo: false,
+    perform: async (request) => {
+      const row = state.items.find((item) => item.key === request.item.key);
+      decide(row, "drop");
+      return { ...h.data, state };
+    },
+  });
+  const days = Math.floor((Date.now() - Date.parse(first)) / 86400000);
+  let text = screen(h.view);
+  assert.equal((text.match(/Request r\d/g) || []).length, 5);
+  assert.doesNotMatch(text, /Request r5/);
+  assert.match(text, /Needs you 6 /);
+  assert.ok(
+    text.includes(
+      `Needs you 5 of 6 · unresolved 8 · oldest eligible ${days} d`,
+    ),
+  );
+  key(h.view, "d");
+  await settled();
+  text = screen(h.view);
+  assert.match(text, /Request r5/);
+  assert.doesNotMatch(text, /Request r6/);
+  assert.ok(text.includes("Needs you 5 of 5 · unresolved 7"));
+  // Search applies before the cap, so a sixth row is still findable.
+  const searched = dashboard(state, 30, {
+    demo: false,
+    initial: { view: 0, search: "Request r5" },
+  });
+  text = screen(searched.view);
+  assert.match(text, /Request r5/);
+  assert.ok(text.includes("Needs you 1 of 1 · unresolved 1"));
+});
+
+test("dispositions keep status and lifecycle fields consistent, and reopening starts a new cycle", () => {
+  const state = emptyState();
+  ingest(state, "mail", "a", [candidate("one")], "complete", "ok", first);
+  const item = state.items[0];
+  assert.equal(item.firstSeenAt, first);
+  for (const [action, status] of [
+    ["next", "resolved"],
+    ["drop", "dismissed"],
+    ["resolve", "resolved"],
+    ["waiting", "waiting"],
+  ]) {
+    decide(item, action, new Date(second));
+    assert.equal(item.status, status);
+    assert.equal(item.decision, action);
+    assert.equal(item.decidedAt, second);
+  }
+  decide(item, "snooze", new Date(second), "2999-01-01T00:00:00.000Z");
+  assert.equal(item.status, "open");
+  assert.equal(item.decision, "snooze");
+  assert.throws(() => decide(item, "snooze", new Date(second)), /end time/);
+  decide(item, "reopen", new Date(second));
+  assert.equal(item.reopenedAt, undefined); // A deferral is not a closure.
+  assert.equal(item.decision, undefined);
+  assert.equal(item.snoozedUntil, undefined);
+  decide(item, "drop", new Date(second));
+  decide(item, "reopen", new Date(second));
+  assert.equal(item.reopenedAt, second);
+  assert.equal(validateState(state), state);
+  // Newer activity on a closed item reopens it and keeps firstSeenAt.
+  const third = "2026-10-18T12:00:00.000Z";
+  decide(item, "resolve", new Date(second));
+  ingest(
+    state,
+    "mail",
+    "a",
+    [candidate("one", third)],
+    "complete",
+    "ok",
+    third,
+  );
+  assert.equal(item.status, "open");
+  assert.equal(item.reopenedAt, third);
+  assert.equal(item.decision, undefined);
+  assert.equal(item.decidedAt, undefined);
+  assert.equal(item.firstSeenAt, first);
+  assert.equal(activeSince(item), Date.parse(third));
+  // Evidence-backed closure records its own disposition and time.
+  const fourth = "2026-10-18T13:00:00.000Z";
+  const snapshot = structuredClone(state);
+  ingest(
+    state,
+    "mail",
+    "a",
+    [],
+    "complete",
+    "ok",
+    fourth,
+    [
+      {
+        sourceId: "one",
+        sourceUpdatedAt: third,
+        evidenceId: "reply-one",
+        evidenceAt: fourth,
+        reason: "The reply answers this exact request.",
+      },
+    ],
+    snapshot,
+  );
+  assert.equal(item.status, "resolved");
+  assert.equal(item.decision, "answered");
+  assert.equal(item.decidedAt, fourth);
+  // Newer activity on a waiting item ends the deferral without a reopening.
+  const fifth = "2026-10-18T14:00:00.000Z";
+  decide(item, "reopen", new Date(fourth));
+  decide(item, "waiting", new Date(fourth));
+  ingest(
+    state,
+    "mail",
+    "a",
+    [candidate("one", fifth)],
+    "complete",
+    "ok",
+    fifth,
+  );
+  assert.equal(item.status, "open");
+  assert.equal(item.decision, undefined);
+  assert.equal(item.reopenedAt, fourth);
+  for (const bad of [
+    { decision: "sent" },
+    { decidedAt: "yesterday" },
+    { firstSeenAt: 3 },
+  ])
+    assert.throws(
+      () => validateState({ ...state, items: [{ ...item, ...bad }] }),
+      /Invalid Comms item/,
+    );
+});
+
+test("closed items show they reopened, and closing the shown item returns to the list", async () => {
+  const state = demoState(first);
+  const item = visibleItems(state, "Needs you")[0];
+  item.reopenedAt = second;
+  const h = dashboard(state, 30, {
+    demo: false,
+    perform: async (request) => {
+      decide(
+        state.items.find((row) => row.key === request.item.key),
+        "resolve",
+      );
+      return { ...h.data, state };
+    },
+  });
+  assert.match(screen(h.view), /↺ reopened/);
+  key(h.view, "\r");
+  assert.match(screen(h.view), /↺ New message since you closed it/);
+  key(h.view, "\r");
+  selectAction(h.view, "Resolve locally");
+  await settled();
+  assert.match(screen(h.view), /P\s+Source\s+Person\s+Request/);
+  assert.doesNotMatch(screen(h.view), /Request details/);
+});
+
+for (const change of ["none", "source", "local"])
+  test(
+    `Add to Next ${change === "none" ? "closes the unchanged reviewed item" : `keeps the item open after a ${change} change during Reminders`}`,
+    { skip: process.platform !== "darwin" },
+    async (t) => {
+      const h = await fakeConfiguredReminders(t);
+      const store = new Store(join(h.directory, "comms"));
+      store.update((state) => Object.assign(state, demoState(first)));
+      const itemKey = visibleItems(store.read(), "Needs you")[0].key;
+      const changed = store.read();
+      const row = changed.items.find((item) => item.key === itemKey);
+      if (change === "source") {
+        row.sourceUpdatedAt = second;
+        row.summary = "Newer source evidence";
+      }
+      if (change === "local") row.draft = "Edited in another session";
+      writeFileSync(
+        h.behavior,
+        JSON.stringify(
+          change === "none"
+            ? {}
+            : { queue: { file: store.file, state: changed } },
+        ),
+      );
+      await withDashboard(h, async (view) => {
+        key(view, "n", "\r");
+        await waitForScreen(
+          view,
+          change === "none"
+            ? /Added to Original Actions\. Item closed\./
+            : /Item changed and remains open\. Review it again\./,
+        );
+      });
+      const saved = store.read().items.find((item) => item.key === itemKey);
+      assert.equal(
+        saved.reminderAdded,
+        "Review the plan and reply with a go/no-go.",
+      );
+      assert.equal(saved.status, change === "none" ? "resolved" : "open");
+      assert.equal(saved.decision, change === "none" ? "next" : undefined);
+      if (change !== "none") assert.equal(saved.summary, row.summary);
+      assert.equal(h.calls().filter((args) => args.length === 7).length, 1);
+    },
+  );
+
+test(
+  "a created reminder with a failed local write warns once and invites no retry",
+  { skip: process.platform !== "darwin" },
+  async (t) => {
+    const h = await fakeConfiguredReminders(t);
+    const store = new Store(join(h.directory, "comms"));
+    store.update((state) => Object.assign(state, demoState(first)));
+    const lock = join(store.directory, "write.lock");
+    writeFileSync(h.behavior, JSON.stringify({ lock }));
+    await withDashboard(h, async (view) => {
+      key(view, "n", "\r");
+      await waitForScreen(view, /could not be saved\. Do not add it again\./);
+      assert.doesNotMatch(screen(view), /unrecognized result|before retrying/);
+    });
+    rmSync(lock);
+    assert.equal(h.calls().filter((args) => args.length === 7).length, 1);
+    const item = visibleItems(store.read(), "Needs you")[0];
+    assert.equal(item.reminderAdded, undefined);
+    assert.equal(item.status, "open");
+  },
+);
+
+test(
+  "routing one action from a legacy meeting review keeps the review open",
+  { skip: process.platform !== "darwin" },
+  async (t) => {
+    const h = await fakeConfiguredReminders(t);
+    writeFileSync(h.behavior, "{}");
+    const store = new Store(join(h.directory, "comms"));
+    store.update((state) => {
+      legacyMeeting(state);
+    });
+    await withDashboard(h, async (view) => {
+      key(view, "n");
+      selectAction(view, "Add action to Reminders Original Actions");
+      key(view, "\r");
+      await waitForScreen(view, /The review remains open/);
+    });
+    const [item] = store.read().items;
+    assert.equal(item.reminderAdded, "Review the proposal.");
+    assert.equal(item.status, "open");
+    assert.equal(item.decision, undefined);
   },
 );

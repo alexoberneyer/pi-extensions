@@ -19,9 +19,11 @@ import {
 } from "@earendil-works/pi-tui";
 import { createVimEditor } from "../vim/index.ts";
 import {
+  backlog,
   clean,
   collectionSources,
   errorMessage,
+  needsYouCap,
   sources,
   views,
   visibleItems,
@@ -95,6 +97,14 @@ const sourceNames = {
 function singleLine(text: string): string {
   return clean(text).replace(/\s+/g, " ").trim();
 }
+// The Next editor starts from the suggestion's first sentence only.
+export function firstSentence(text: string): string {
+  const line = singleLine(clean(text).split(/\n\s*\n/)[0] || "");
+  return line.match(/^.*?[.!?](?=\s|$)/)?.[0] || line;
+}
+function reopened(item: Item): boolean {
+  return Boolean(item.reopenedAt) && item.status === "open";
+}
 function pad(text: string, width: number): string {
   const clipped = truncateToWidth(text, Math.max(0, width));
   return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
@@ -111,6 +121,7 @@ function age(timestamp: string): string {
 }
 function itemStatus(item: Item): string {
   if (item.draftStale) return "Review draft";
+  if (reopened(item)) return "↺ reopened";
   if (item.snoozedUntil && Date.parse(item.snoozedUntil) > Date.now())
     return "Snoozed";
   return `${item.status}${item.draft ? " · draft ready" : ""}`;
@@ -122,8 +133,10 @@ function taskKey(task: NextTask): string {
 export class Dashboard implements Component, Focusable {
   private input = new Input({
     prompt: "Search: ",
-    placeholder: "person, topic or source",
+    placeholder: "press / to search person, topic or source",
   });
+  // Letters act on the selected item unless / focused the search box.
+  private searching = false;
   private selection = 0;
   private visible: Item[] = [];
   private scroll = 0;
@@ -177,7 +190,11 @@ export class Dashboard implements Component, Focusable {
   }
   private syncFocus(): void {
     this.input.focused =
-      this.hasFocus && this.screen === "list" && !this.menu && !this.editing;
+      this.hasFocus &&
+      this.screen === "list" &&
+      this.searching &&
+      !this.menu &&
+      !this.editing;
     if (this.editing)
       this.editing.editor.focused = this.hasFocus && !this.editing.discard;
   }
@@ -227,7 +244,12 @@ export class Dashboard implements Component, Focusable {
       : this.visible.find((row) => row.key === this.selected);
   }
   private refilter(): void {
-    this.visible = this.rows();
+    const previous = this.selected;
+    const rows = this.rows();
+    // Needs you shows the top few eligible rows after filtering. Deciding one
+    // reveals the next. Other views stay uncapped.
+    this.visible =
+      views[this.view] === "Needs you" ? rows.slice(0, needsYouCap) : rows;
     const list = this.view === 2 ? this.tasks() : this.visible;
     const matches = (row: Item | NextTask) =>
       "key" in row ? row.key === this.selected : taskKey(row) === this.task;
@@ -246,7 +268,13 @@ export class Dashboard implements Component, Focusable {
         ? taskKey(this.tasks()[this.selection])
         : undefined;
     else this.selected = this.visible[this.selection]?.key;
-    if (this.screen === "detail" && !this.item()) this.screen = "list";
+    // A closed or vanished item returns to the list instead of silently
+    // showing the next request in its place.
+    if (
+      this.screen === "detail" &&
+      (!this.item() || (this.view !== 2 && this.selected !== previous))
+    )
+      this.screen = "list";
     this.syncFocus();
   }
   private finish(action: Choice["action"], item?: Item): void {
@@ -416,7 +444,8 @@ export class Dashboard implements Component, Focusable {
     );
     const { editor } = created;
     editor.disableSubmit = true;
-    const original = action === "save-draft" ? item.draft : item.suggestion;
+    const original =
+      action === "save-draft" ? item.draft : firstSentence(item.suggestion);
     editor.setText(original);
     this.editing = {
       item: structuredClone(item),
@@ -431,7 +460,8 @@ export class Dashboard implements Component, Focusable {
     this.syncFocus();
   }
   private cancel(): void {
-    if (this.screen !== "list") {
+    if (this.searching) this.searching = false;
+    else if (this.screen !== "list") {
       this.screen = "list";
       this.detailScroll = 0;
     } else if (this.input.getValue()) {
@@ -463,7 +493,12 @@ export class Dashboard implements Component, Focusable {
         } else edit.discard = false;
       } else if (cancel && (!edit.vimEnabled || !matchesKey(data, "escape"))) {
         this.cancelEditor();
-      } else if (matchesKey(data, "ctrl+s")) {
+      } else if (
+        matchesKey(data, "ctrl+s") ||
+        (edit.action === "add-next" &&
+          this.keys.matches(data, "tui.input.submit"))
+      ) {
+        // One Next action is one line, so Enter adds it.
         void this.run(edit.action, edit.item, edit.editor.getExpandedText());
       } else {
         // A reply editor uses Enter for paragraphs, never sending or saving.
@@ -501,6 +536,7 @@ export class Dashboard implements Component, Focusable {
       const item = this.item();
       if (this.screen === "detail" && item) this.openActions(item);
       else if (this.screen === "list" && item) {
+        this.searching = false;
         this.screen = "detail";
         this.detailScroll = 0;
         this.detailExpanded = false;
@@ -545,7 +581,7 @@ export class Dashboard implements Component, Focusable {
           this.selection = 0;
           this.scroll = 0;
           this.refilter();
-        } else {
+        } else if (this.searching) {
           const before = this.input.getValue();
           this.input.handleInput(data);
           if (this.input.getValue() !== before) {
@@ -553,6 +589,25 @@ export class Dashboard implements Component, Focusable {
             this.scroll = 0;
             this.refilter();
           }
+        } else if (data === "/") {
+          this.searching = true;
+          this.syncFocus();
+        } else if (data === "n" || data === "d") {
+          const item = this.item();
+          if (!item) {
+            /* Nothing selected, or the Next view. */
+          } else if (data === "d") void this.run("dismiss", item);
+          else if (
+            !(collectionSources as readonly string[]).includes(item.source)
+          ) {
+            // A legacy review may hold several actions. Route them from its
+            // menu so one reminder never closes the rest.
+            this.screen = "detail";
+            this.detailScroll = 0;
+            this.openActions(item);
+          } else if (this.demo)
+            this.notice = "Demo mode cannot write to Reminders.";
+          else this.openEditor(item, "add-next");
         }
       }
     }
@@ -593,6 +648,11 @@ export class Dashboard implements Component, Focusable {
     const lines = [
       ...text(item.title, bold),
       ...text(`${item.person} · ${sourceNames[item.source]}`, muted),
+      ...(reopened(item)
+        ? text("↺ New message since you closed it", (line) =>
+            th.fg("warning", line),
+          )
+        : []),
       "",
       th.bold("Next action"),
       ...text(
@@ -679,6 +739,12 @@ export class Dashboard implements Component, Focusable {
       `Reminders ${this.data.reminderList || "Next"}: ${this.data.nextStatus}`,
       ...(this.data.triageStatus ? [`Triage: ${this.data.triageStatus}`] : []),
     ];
+  }
+  // Counts follow the current source and search filters. Unresolved includes
+  // waiting and snoozed items, so deferring work does not look like progress.
+  private summary(): string {
+    const counts = backlog(this.rows(undefined, "All"));
+    return `Needs you ${Math.min(needsYouCap, counts.eligible)} of ${counts.eligible} · unresolved ${counts.unresolved} · oldest eligible ${counts.oldestDays} d`;
   }
   private emptyLabel(): string {
     if (this.input.getValue()) return "No matches. Esc clears search.";
@@ -790,7 +856,7 @@ export class Dashboard implements Component, Focusable {
         "dim",
         this.view === 2
           ? ` · Reminders ${this.data.reminderList || "Next"}`
-          : ` · ${this.source ? sourceNames[this.source] : "All sources"}`,
+          : ` · ${this.source ? sourceNames[this.source] : "All sources"} · ${this.summary()}`,
       );
     const healthLine = th.fg(
       health.incomplete ? "warning" : "dim",
@@ -836,8 +902,12 @@ export class Dashboard implements Component, Focusable {
           this.busy
             ? "Working · wait for the result before retrying"
             : edit.vimEnabled
-              ? "Ctrl+S save · Enter newline · Esc NORMAL, then back"
-              : "Ctrl+S save · Enter newline · Esc back",
+              ? edit.action === "add-next"
+                ? "Enter add · Esc NORMAL, then back"
+                : "Ctrl+S save · Enter newline · Esc NORMAL, then back"
+              : edit.action === "add-next"
+                ? "Enter add · Esc back"
+                : "Ctrl+S save · Enter newline · Esc back",
         ),
       );
       return this.frame(lines, width, height);
@@ -989,9 +1059,9 @@ export class Dashboard implements Component, Focusable {
           ? "Working · wait for the result before retrying"
           : this.data.triageRunning
             ? "Claude triage running · ^X cancel · ^L reload local · Esc"
-            : w >= 90
-              ? "Tab views · Enter details · ^O source · ^R triage · ^G coverage · Esc"
-              : "Tab views · Enter details · ^R refresh · Esc",
+            : w >= 100
+              ? "n Next · d Drop · / search · Enter details · Tab views · ^O source · ^R triage · ^G coverage · Esc"
+              : "n Next · d Drop · / search · Enter details · Tab · Esc",
       ),
     );
     return this.frame(lines, width, height);

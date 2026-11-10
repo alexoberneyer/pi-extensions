@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { packagePath, readConfig } from "../../lib/config.mjs";
 import { approvalStatus, initializeApproval } from "../approval/ready.ts";
 import {
@@ -24,6 +24,7 @@ import {
 } from "./dashboard.ts";
 import {
   clean,
+  decide,
   demoState,
   errorMessage,
   ingest,
@@ -769,6 +770,16 @@ export default async function comms(pi: ExtensionAPI) {
           nextList = list;
         }
         nextStatus = `A task was added. Ctrl+R refreshes ${list}.`;
+        // Legacy meeting and scratchpad reviews can hold several actions.
+        // Routing one of them never closes the review.
+        const closable =
+          (collectionSources as readonly string[]).includes(current.source) &&
+          ["open", "waiting"].includes(current.status);
+        let outcomeNotice = closable
+          ? `Added to ${list}. Item closed.`
+          : current.status === "resolved" || current.status === "dismissed"
+            ? `Action is in Reminders ${list}.`
+            : `Action is in Reminders ${list}. The review remains open.`;
         try {
           update((state) => {
             const row = state.items.find((row) => row.key === current.key);
@@ -776,36 +787,33 @@ export default async function comms(pi: ExtensionAPI) {
               throw new Error(
                 "The source item disappeared before routing was recorded.",
               );
+            // Close only the exact context that was reviewed. A refresh or
+            // another session may have changed it while Reminders ran.
+            const unchanged = isDeepStrictEqual(row, current);
             row.reminderAdded = normalized;
+            if (closable && unchanged) decide(row, "next");
+            else if (closable)
+              outcomeNotice = `Action is in ${list}. Item changed and remains open. Review it again.`;
           });
         } catch {
           return snapshot(
             `Action is in ${list}, but its local marker could not be saved. Do not add it again.`,
           );
         }
-        return snapshot(
-          `Action is in Reminders ${list}. The review remains open.`,
-        );
+        return snapshot(outcomeNotice);
       }
       update((state) => {
         const row = currentItem(current, state);
-        // Status round trips must still invalidate an in-flight assessment.
-        row.draftRevision++;
-        delete row.resolution;
-        if (action === "snooze") {
-          row.snoozedUntil = snoozeUntil();
-          row.status = "open";
-        } else {
-          row.status =
-            action === "waiting"
-              ? "waiting"
-              : action === "resolve"
-                ? "resolved"
-                : action === "dismiss"
-                  ? "dismissed"
-                  : "open";
-          delete row.snoozedUntil;
-        }
+        if (action === "snooze")
+          decide(row, "snooze", new Date(), snoozeUntil());
+        else if (action === "dismiss") decide(row, "drop");
+        else if (
+          action === "waiting" ||
+          action === "resolve" ||
+          action === "reopen"
+        )
+          decide(row, action);
+        else throw new Error(`Unsupported Comms action: ${action}.`);
       });
       return snapshot(
         "Local status updated. Nothing sent or deleted at the source.",

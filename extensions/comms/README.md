@@ -39,7 +39,7 @@ Needs you shows at most five eligible items: open and not snoozed, by priority, 
 
 ## Reply-ready triage
 
-Collection always suggests a concrete next action. It can also prepare a local reply for mail or Teams when the thread and recipient are verified and the answer needs no missing facts, user decision or invented commitment. Otherwise the item names the blocker. Proposals seed only new or untouched empty drafts. Refresh never replaces your saved wording or resurrects a deliberately cleared draft.
+Collection always suggests a concrete next action. It can also prepare a local reply for mail or Teams when the thread and recipient are verified and nothing blocks the answer. A blocker is a missing fact, unreadable evidence, an unverified recipient or ownership, or a decision only you can make. Any blocker withholds the reply and is shown on the item. Residual doubt about whether the ask is still open is shown as uncertainty, one line, and does not withhold the reply. Each refresh reports how many proposals arrived and how many became drafts, in the finish notice and in source coverage. Proposals seed only new or untouched empty drafts. Refresh never replaces your saved wording or resurrects a deliberately cleared draft.
 
 Open an item to read its proposed action and unsent draft. Edit locally with Ctrl+S, copy the draft and open the original to send it yourself. Comms never sends messages or creates remote drafts. The queue reopens after a normally completed AI-drafting job unless other input or work needs focus.
 
@@ -58,12 +58,15 @@ Use the package's user configuration at `$XDG_CONFIG_HOME/pi-extensions/config.j
     "notesDirectory": null,
     "triageInstructions": null,
     "messageInstructions": null,
+    "voiceInstructions": null,
     "reminderList": "Next"
   }
 }
 ```
 
 Neutral triage and message templates ship in `workflows/comms/`. No private notes checkout is required for demo or normal collection. Explicit instruction paths override bundled templates. For compatibility, a configured notes directory or `PI_COMMS_NOTES_DIR` can supply `.claude/commands/triage.md` and `.claude/commands/message.md`. Explicit instruction paths take precedence. The environment variable overrides the notes directory only. Missing legacy files use bundled templates. Missing required overrides fail visibly.
+
+`voiceInstructions` points to an optional private file of writing rules for proposed replies, at most 8 KiB. Both collectors receive it inlined as style guidance. An unreadable or oversized file is reported and drafts use the default voice. Each draft records whether triage, AI or you wrote it. That is provenance only, never evidence that it was sent.
 
 `meetingInstructions`, `remarkableSource` and `notebookName` are still accepted so older configuration files load. Comms no longer uses them. Accepted actions use the configured Reminders list. Calendar windows and tomorrow-at-09:00 snoozes use the configured timezone. Identity labels never replace authenticated-account verification.
 

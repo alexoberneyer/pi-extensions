@@ -20,6 +20,8 @@ Comms includes neutral triage and message instructions. Override them with `comm
 
 `notesDirectory` sets the Claude collector's working directory and the legacy instruction lookup. It is not required for demo or ordinary collection. `PI_COMMS_NOTES_DIR` remains an explicit compatibility override. Missing required, explicitly configured instructions are reported.
 
+`comms.voiceInstructions` points to an optional private file of writing rules for proposed replies, at most 8 KiB. Keep it to voice and formatting. Both collectors receive it inlined. An unreadable or oversized file is reported and drafts use the default voice.
+
 `meetingInstructions`, `remarkableSource` and `notebookName` are still accepted so older configuration files load. Comms no longer collects meetings or captures reMarkable notebooks.
 
 Opening `/comms` or selecting a collection/drafting action activates the corresponding queue access. `/comms demo` uses disposable data and does not authorize access to the real queue. Activated snapshot access can place retained private material into model context until the session is replaced or reloaded. See the Comms privacy section before enabling it.

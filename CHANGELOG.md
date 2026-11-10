@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Split Comms collector notes into a one-line blocker and a one-line uncertainty. Only a blocker withholds a proposed reply. Refreshes report proposals received and seeded. Add optional `comms.voiceInstructions` and record each draft's origin.
 - Decide Comms items from the list: `n` adds a Next reminder and closes the unchanged item, `d` drops it, `/` searches. Needs you shows five eligible items, oldest first within a priority, with backlog counts. Items record first-seen, reopen and decision times.
 - Remove the Comms reply wrapper. Copy the draft and open the original to send it.
 - Stop collecting meeting follow-ups and reMarkable captures in Comms. Saved items still load. Their configuration keys are still accepted.

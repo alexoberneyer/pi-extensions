@@ -106,6 +106,7 @@ export type ClaudeRequest = {
   startedAt: string;
   state: State;
   instructions: string;
+  voice?: string;
   signal: AbortSignal;
   progress: (text: string) => void;
 };
@@ -118,6 +119,7 @@ export async function runClaudeTriage(
     request.startedAt,
     request.state,
     request.instructions,
+    request.voice,
   );
   if (Buffer.byteLength(prompt) > 8 * 1024 * 1024)
     throw new Error("Comms context is too large for a bounded triage run.");

@@ -17,6 +17,7 @@ import {
   type Candidate,
   type Coverage,
   type CollectionSource,
+  type ProposalCounts,
   type State,
 } from "./state.ts";
 
@@ -33,8 +34,16 @@ export const candidateSchema = Type.Object({
   }),
   uncertainty: Type.Optional(
     Type.String({
-      maxLength: 2000,
-      description: "Missing checks or unverified replies/ownership, if any",
+      maxLength: 300,
+      description:
+        "One line: residual doubt about whether the ask is still open. Does not block a proposal",
+    }),
+  ),
+  blocker: Type.Optional(
+    Type.String({
+      maxLength: 300,
+      description:
+        "One line: missing facts, unreadable evidence, unverified recipient or ownership, or a decision only the user can make",
     }),
   ),
   suggestion: Type.String({ maxLength: 2000 }),
@@ -42,7 +51,7 @@ export const candidateSchema = Type.Object({
     Type.String({
       maxLength: 20000,
       description:
-        "Optional local plain-text reply for verified mail/teams only, with all checks complete, no uncertainty or user decision, and no invented facts or commitments",
+        "Optional local plain-text reply for verified mail/teams only, with no blocker and no invented facts or commitments. Residual uncertainty is allowed",
     }),
   ),
   priority: Type.Integer({ minimum: 1, maximum: 3 }),
@@ -243,13 +252,14 @@ export function mergeTriage(
   results: SourceResult[],
   startedAt: string,
   previous?: State,
-): void {
+): ProposalCounts {
+  const total: ProposalCounts = { proposals: 0, seeded: 0 };
   for (const row of results) {
     if (!collectionSources.includes(row.source))
       throw new Error(
         "Communication refresh cannot ingest local capture sources.",
       );
-    ingest(
+    const counts = ingest(
       state,
       row.source,
       row.account,
@@ -260,13 +270,17 @@ export function mergeTriage(
       row.resolutions,
       previous,
     );
+    total.proposals += counts.proposals;
+    total.seeded += counts.seeded;
   }
+  return total;
 }
 export function externalPrompt(
   runId: string,
   startedAt: string,
   state: State,
   instructions: string,
+  voice?: string,
 ): string {
   const retained = state.items
     .filter(
@@ -283,6 +297,7 @@ export function externalPrompt(
       person: item.person,
       summary: item.summary,
       ...(item.uncertainty ? { uncertainty: item.uncertainty } : {}),
+      ...(item.blocker ? { blocker: item.blocker } : {}),
       status: item.status,
     }));
   return `Collect read-only Comms triage results for my Pi dashboard. Do not write the queue yourself.
@@ -296,8 +311,8 @@ The canonical triage instructions below supply priorities, noise filters, option
 - Match exact outstanding requests. A later unrelated message or my unrelated reply does not close a request. Preserve outstanding promises. Keep distinct asks separate, using stable provider IDs and real source last-modified timestamps, not collection time. Reuse original IDs for retained requests.
 - For retained requests demonstrably completed, return resolutions with the original sourceId and sourceUpdatedAt, the stable evidenceId and provider evidenceAt of the reply/completion you actually read, and a short reason. Evidence must be at or before run start. Explain why it fully addresses the SAME request and leaves no outstanding promise. Partial coverage may resolve individually verified requests in a verified account, but unavailable/unverified sources cannot. An unrelated reply, missing request or an unsent draft is not completion. Never merely omit an answered retained request or put its closure only in coverage detail. Do not return the same request in both items and resolutions. Omit resolutions or use [] when none are verified.
 - Return ALL actionable candidates, not just the top three, at most 1000 per source/account. Each request ID must occur only once within its source/account. Never use one conversation ID for distinct requests. Include HTTPS conversation links when available. Priority 1 needs attention soon, 2 normal, 3 can wait.
-${triageDraftingInstructions()}
-- Keep summary to the request and verified context. Put missing checks, uncertain ownership and unverified replies in uncertainty, omitting it only when no uncertainty is identified. Do not treat a reply not found as proof that no reply was sent. Preserve unresolved uncertainty from retained requests. Start suggestion with one immediate action, then put any conditional follow-up in a separate paragraph. Use absolute dates for deadlines rather than stale phrases such as "today or tomorrow".
+${triageDraftingInstructions(voice)}
+- Keep summary to the request and verified context. Do not treat a reply not found as proof that no reply was sent. Start suggestion with one immediate action, then put any conditional follow-up in a separate paragraph. Use absolute dates for deadlines rather than stale phrases such as "today or tomorrow".
 - Return the requested structured object with this runId and one results entry per source/account. Complete means identity verified AND all pages exhausted. Unknown identity must use account "unverified" and status unavailable. Never infer resolution from absence. No prose or Markdown task/log files.
 Canonical instructions (only the filtering and calendar rules apply):
 ${instructions}

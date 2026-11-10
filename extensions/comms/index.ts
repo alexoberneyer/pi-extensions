@@ -54,6 +54,7 @@ import {
   refreshPrompt,
   reminderArguments,
   snoozeUntil,
+  voiceInstructions,
 } from "./workflow.ts";
 
 const runFile = promisify(execFile);
@@ -357,8 +358,9 @@ export default async function comms(pi: ExtensionAPI) {
         );
       const current = job;
       const items = validateCandidates(args.items as Candidate[], args.source);
-      const state = store().update((state) =>
-        ingest(
+      let counts = { proposals: 0, seeded: 0 };
+      const state = store().update((state) => {
+        counts = ingest(
           state,
           args.source,
           args.account,
@@ -368,14 +370,15 @@ export default async function comms(pi: ExtensionAPI) {
           current.startedAt,
           args.resolutions as Resolution[] | undefined,
           current.state,
-        ),
-      );
+        );
+      });
       job.completed.add(key);
       return result({
         saved: items.length,
         retained: state.items.length,
         source: args.source,
         status: args.status,
+        ...counts,
       });
     },
   });
@@ -402,7 +405,7 @@ export default async function comms(pi: ExtensionAPI) {
       )
         throw new Error("Select Draft with AI in /comms first.");
       store().update((state) =>
-        setDraft(state, args.key, args.expectedRevision, args.draft),
+        setDraft(state, args.key, args.expectedRevision, args.draft, "ai"),
       );
       return result({ saved: true, sent: false });
     },
@@ -440,6 +443,8 @@ export default async function comms(pi: ExtensionAPI) {
     const queue = store();
     const requestState = queue.read();
     const instructions = readFileSync(canonical("triage"), "utf8");
+    const voice = voiceInstructions();
+    if (voice.warning) ctx.ui.notify(voice.warning, "warning");
     const release = claimTriage(queue.directory);
     const controller = new AbortController();
     const runId = randomUUID();
@@ -467,6 +472,7 @@ export default async function comms(pi: ExtensionAPI) {
           startedAt,
           state: requestState,
           instructions,
+          voice: voice.text,
           signal: controller.signal,
           progress: publish,
         });
@@ -474,14 +480,15 @@ export default async function comms(pi: ExtensionAPI) {
         if (!active) return;
         // Re-read under the existing atomic store lock. Local drafts/status edits
         // made while Claude collected evidence are never replaced by a snapshot.
-        const latest = queue.update((state) =>
-          mergeTriage(state, results, startedAt, requestState),
-        );
+        let counts = { proposals: 0, seeded: 0 };
+        const latest = queue.update((state) => {
+          counts = mergeTriage(state, results, startedAt, requestState);
+        });
         const incomplete = results.filter(
           (row) => row.status !== "complete",
         ).length;
         publish(
-          `Claude triage finished · ${latest.items.length} retained · ${incomplete} incomplete source/account checks`,
+          `Claude triage finished · ${latest.items.length} retained · ${incomplete} incomplete source/account checks · ${counts.seeded} of ${counts.proposals} reply proposals seeded`,
         );
         ctx.ui.notify(
           incomplete
@@ -517,6 +524,8 @@ export default async function comms(pi: ExtensionAPI) {
     canStart(ctx);
     const file = canonical("triage");
     const state = store().read();
+    const voice = voiceInstructions();
+    if (voice.warning) ctx.ui.notify(voice.warning, "warning");
     const current: Job = {
       kind: "refresh",
       id: randomUUID(),
@@ -528,7 +537,7 @@ export default async function comms(pi: ExtensionAPI) {
     try {
       activateTools("comms_snapshot", "comms_ingest");
       pi.sendUserMessage(
-        refreshPrompt(current.id, current.startedAt, state, file),
+        refreshPrompt(current.id, current.startedAt, state, file, voice.text),
       );
     } catch (error) {
       job = undefined;

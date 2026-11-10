@@ -674,6 +674,12 @@ export class Dashboard implements Component, Focusable {
       ),
       ...text(item.summary),
     ];
+    if (item.blocker?.trim())
+      lines.push(
+        "",
+        th.fg("warning", "Blocked · no reply proposed"),
+        ...text(item.blocker),
+      );
     if (item.uncertainty?.trim())
       lines.push(
         "",
@@ -683,7 +689,10 @@ export class Dashboard implements Component, Focusable {
     if (item.draft.trim())
       lines.push(
         "",
-        ...text("Local reply draft · not sent", muted),
+        ...text(
+          `Local reply draft${item.draftOrigin ? ` · ${{ triage: "prepared during triage", ai: "drafted with AI", manual: "edited by you" }[item.draftOrigin]}` : ""} · not sent`,
+          muted,
+        ),
         ...(item.draftStale
           ? text("Source changed. Review this draft before using it.", (line) =>
               th.fg("warning", line),

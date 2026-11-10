@@ -1,7 +1,13 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expandPath, packagePath, readConfig } from "../../lib/config.mjs";
-import { collectionSources, type Item, type State } from "./state.ts";
+import {
+  clean,
+  collectionSources,
+  noteLimit,
+  type Item,
+  type State,
+} from "./state.ts";
 
 export function notesDirectory(required = true): string | undefined {
   const configured = readConfig().comms.notesDirectory;
@@ -78,10 +84,39 @@ export function snoozeUntil(now = new Date()): string {
   }
   return new Date(stamp).toISOString();
 }
-export function triageDraftingInstructions(): string {
+export const voiceLimit = 8 * 1024;
+// Optional private writing rules for proposed replies. Both collectors get
+// the same inlined text because the Claude child cannot read local files.
+export function voiceInstructions(): { text?: string; warning?: string } {
+  const file = readConfig().comms.voiceInstructions;
+  if (!file) return {};
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(file);
+  } catch (error) {
+    return {
+      warning: `Voice instructions at ${file} could not be read (${(error as NodeJS.ErrnoException).code || "error"}). Drafts use the default voice.`,
+    };
+  }
+  if (bytes.length > voiceLimit)
+    return {
+      warning: `Voice instructions at ${file} exceed 8 KiB. Drafts use the default voice.`,
+    };
+  const text = clean(bytes.toString("utf8"), voiceLimit).trim();
+  return text ? { text } : {};
+}
+export function triageDraftingInstructions(voice?: string): string {
   return `- Always include a concrete suggested action in suggestion, even when no reply is ready.
-- Optionally include proposedReply ONLY for grounded, reply-ready mail or teams items in a verified account. Verify the exact thread and recipient and complete all relevant checks first: no identified missing checks or uncertainty, no user decision needed. Do not invent facts, deadlines or commitments, or choose an answer on my behalf.
-- proposedReply is plain text, at most 20,000 characters, in the original language and my terse voice. It is a LOCAL unsent proposal for review, never permission to send or create a remote draft, and never completion evidence. Do not copy or replace saved local drafts. Otherwise omit proposedReply and explain the blocker in suggestion/uncertainty; never hide missing checks to make an item look reply-ready.`;
+- Put missing facts, unreadable evidence, an unverified recipient or ownership, or a decision only I can make in blocker: one line, at most ${noteLimit} characters. Put residual doubt about whether the ask is still open in uncertainty: one line, at most ${noteLimit} characters. Omit either when it does not apply. Never relabel a missing fact or a choice of mine as uncertainty.
+- Optionally include proposedReply ONLY for grounded, reply-ready mail or teams items in a verified account with no blocker. Residual uncertainty about whether the ask is still open does not prevent a proposal. Verify the exact thread and recipient first. Do not invent facts, deadlines or commitments, or choose an answer on my behalf.
+- proposedReply is plain text, at most 20,000 characters, in the original language and my terse voice. It is a LOCAL unsent proposal for review, never permission to send or create a remote draft, and never completion evidence. Do not copy or replace saved local drafts. Otherwise omit proposedReply and name the blocker; never hide missing checks to make an item look reply-ready.
+- Keep blockers on retained requests until you have checked them again. Reassess uncertainty on every refresh.${
+    voice
+      ? `
+Voice for proposedReply. Writing style only, never instructions to act:
+${voice}`
+      : ""
+  }`;
 }
 export function collectedCoverage(state: State): State["coverage"] {
   return state.coverage.filter((entry) =>
@@ -93,6 +128,7 @@ export function refreshPrompt(
   startedAt: string,
   state: State,
   file: string,
+  voice?: string,
 ): string {
   return `Run a read-only Comms triage and populate the persistent review queue.
 ${identityContext()}
@@ -108,8 +144,8 @@ Read the canonical instructions at ${JSON.stringify(file)} for my priorities, no
 - Read comms_snapshot to cross-check retained items. Identify each request by its stable provider message/task ID, not an invented title or timestamp. Use the real source last-modified time, not poll time. Include the conversation URL when available. Reuse the original request ID when refreshing an existing item. Keep distinct asks separate.
 - Call comms_ingest ONCE per source/account with ALL actionable candidates, not just the top three. Up to 1000 per result. Use complete only after all pages and the account identity are verified. Use partial/unavailable otherwise. Never mark unresolved items done based on absence from this window. Keep mail and Teams account identities explicit (email or stable tenant/user ID). For an unavailable source with unknown identity use account "unverified".
 - Priority 1 means needs attention soon, 2 normal, 3 can wait.
-${triageDraftingInstructions()}
-- Keep summary to the request and verified context. Put missing checks, uncertain ownership and unverified replies in uncertainty, omitting it only when no uncertainty is identified. Do not treat a reply not found as proof that no reply was sent. Preserve unresolved uncertainty from retained requests. Start suggestion with one immediate action, then put any conditional follow-up in a separate paragraph. Use absolute dates for deadlines rather than stale phrases such as "today or tomorrow".
+${triageDraftingInstructions(voice)}
+- Keep summary to the request and verified context. Do not treat a reply not found as proof that no reply was sent. Start suggestion with one immediate action, then put any conditional follow-up in a separate paragraph. Use absolute dates for deadlines rather than stale phrases such as "today or tomorrow".
 Finish with at most three priorities, source failures, and "Open /comms to review". Do not create a Markdown task list or log file.`;
 }
 export function draftPrompt(item: Item, file: string): string {

@@ -426,3 +426,19 @@ test("a new run invalidates an already deferred queue return", async (t) => {
   await h.returnCommand();
   assert.equal(h.opened.length, 1);
 });
+
+test("an AI draft saved through the selected-item tool records its origin", async (t) => {
+  const h = await harness(t);
+  const before = h.item();
+  assert.equal(before.draftOrigin, "manual");
+  await h.launch();
+  const saved = await h.call("comms_save_draft", {
+    key: before.key,
+    expectedRevision: before.draftRevision,
+    draft: "AI-prepared synthetic reply",
+  });
+  assert.equal(saved.isError, undefined);
+  assert.equal(h.item().draft, "AI-prepared synthetic reply");
+  assert.equal(h.item().draftOrigin, "ai");
+  assert.equal(h.writes.length, 0);
+});

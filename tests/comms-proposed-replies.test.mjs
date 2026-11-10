@@ -379,14 +379,46 @@ test("unsupported sources keep actionable items but ignore otherwise valid propo
   }
 });
 
-test("unverified accounts and identified uncertainty cannot create local drafts", () => {
+test("open-ask uncertainty keeps its proposal, with counts that show what was seeded", () => {
+  const snapshot = emptyState();
+  const rows = parseTriage(
+    payload([
+      result({
+        items: [
+          candidate({
+            proposedReply: reply,
+            uncertainty:
+              "A colleague may already have answered in the channel.",
+          }),
+        ],
+      }),
+    ]),
+    "synthetic-run",
+    snapshot,
+    second,
+  );
+  const state = emptyState();
+  assert.deepEqual(mergeTriage(state, rows, second, snapshot), {
+    proposals: 1,
+    seeded: 1,
+  });
+  assert.equal(state.items[0].draft, reply.trim());
+  assert.equal(state.items[0].draftOrigin, "triage");
+  assert.equal(
+    state.items[0].uncertainty,
+    "A colleague may already have answered in the channel.",
+  );
+  assert.match(state.coverage[0].detail, /^Drafts: 1 of 1 proposals seeded\./);
+});
+
+test("unverified accounts and blockers cannot create local drafts", () => {
   for (const changes of [
     { account: "unverified", status: "partial" },
     {
       items: [
         candidate({
           proposedReply: reply,
-          uncertainty: "Calendar availability has not been checked.",
+          blocker: "Calendar availability has not been checked.",
         }),
       ],
     },
@@ -394,7 +426,7 @@ test("unverified accounts and identified uncertainty cannot create local drafts"
       items: [
         candidate({
           proposedReply: reply,
-          uncertainty: "The user must choose between two options.",
+          blocker: "The user must choose between two options.",
         }),
       ],
     },
@@ -408,9 +440,11 @@ test("unverified accounts and identified uncertainty cannot create local drafts"
     );
     assert.notEqual(rows[0].status, "unavailable");
     const state = emptyState();
-    mergeTriage(state, rows, second, snapshot);
+    const counts = mergeTriage(state, rows, second, snapshot);
+    assert.equal(counts.seeded, 0);
     assert.equal(state.items[0].draft, "");
-    assert.equal(state.items[0].uncertainty, changes.items?.[0].uncertainty);
+    assert.equal(state.items[0].draftOrigin, undefined);
+    assert.equal(state.items[0].blocker, changes.items?.[0].blocker);
     assert.equal(state.items[0].suggestion, candidate().suggestion);
   }
   for (const changes of [
@@ -522,14 +556,17 @@ test("both collector prompts require selective local proposals, concrete actions
       "mail or teams",
       "verified account",
       "exact thread and recipient",
-      "no identified missing checks or uncertainty",
-      "no user decision needed",
+      "with no blocker",
+      "Residual uncertainty about whether the ask is still open does not prevent a proposal",
+      "a decision only I can make in blocker",
+      "Never relabel a missing fact or a choice of mine as uncertainty",
+      "Keep blockers on retained requests until you have checked them again. Reassess uncertainty on every refresh.",
       "Do not invent facts, deadlines or commitments",
       "plain text",
       "20,000 characters",
       "original language and my terse voice",
       "LOCAL unsent proposal",
-      "Otherwise omit proposedReply and explain the blocker in suggestion/uncertainty",
+      "Otherwise omit proposedReply and name the blocker",
       "Do not copy or replace saved local drafts",
       "create remote drafts",
       "return resolutions",
@@ -538,7 +575,7 @@ test("both collector prompts require selective local proposals, concrete actions
     assert.match(prompt, /(?:Do not|Never) send/);
     assert.doesNotMatch(
       prompt,
-      /without drafting replies|leave message generation to|SYNTHETIC-SAVED-WORDING/,
+      /without drafting replies|leave message generation to|SYNTHETIC-SAVED-WORDING|Preserve unresolved uncertainty|no identified missing checks or uncertainty/,
     );
   }
   const canonical = readFileSync(
@@ -553,7 +590,7 @@ test("both collector prompts require selective local proposals, concrete actions
     "original language",
     "terse voice",
     "omit proposedReply",
-    "suggestion/uncertainty",
+    "Residual uncertainty does not prevent a proposal",
     "Collection never sends messages, creates remote drafts",
   ])
     assert.ok(canonical.includes(text), text);

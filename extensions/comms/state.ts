@@ -23,13 +23,22 @@ export const decisions = [
   "expired",
 ] as const;
 export type Decision = (typeof decisions)[number];
+export const draftOrigins = ["triage", "ai", "manual"] as const;
+export type DraftOrigin = (typeof draftOrigins)[number];
+// New collector notes are one short line. Saved records keep the old limit.
+export const noteLimit = 300;
+const legacyUncertaintyLimit = 2000;
 export type Candidate = {
   sourceId: string;
   sourceUpdatedAt: string;
   title: string;
   person: string;
   summary: string;
+  // Residual doubt about whether the ask is still open. It does not block a draft.
   uncertainty?: string;
+  // Missing facts, unreadable evidence, unverified recipient or ownership, or a
+  // decision only the user can make. Any blocker withholds a proposed reply.
+  blocker?: string;
   suggestion: string;
   proposedReply?: string;
   priority: number;
@@ -51,6 +60,8 @@ export type Item = Omit<Candidate, "proposedReply"> & {
   draft: string;
   draftRevision: number;
   draftStale: boolean;
+  // Provenance only, never evidence of delivery or unchanged use.
+  draftOrigin?: DraftOrigin;
   reminderAdded?: string;
   resolution?: Resolution;
   // Optional lifecycle fields. Legacy items stay undated rather than invented.
@@ -109,6 +120,7 @@ function validDate(value: unknown): value is string {
 export function validateCandidate(
   value: Candidate,
   source?: Source,
+  stored = false,
 ): Candidate {
   for (const key of [
     "sourceId",
@@ -129,11 +141,19 @@ export function validateCandidate(
     throw new Error(
       "An item needs a stable source ID, title and source timestamp.",
     );
-  if (
-    value.uncertainty !== undefined &&
-    (typeof value.uncertainty !== "string" || value.uncertainty.length > 2000)
-  )
-    throw new Error("Invalid item uncertainty.");
+  for (const [field, max] of [
+    ["uncertainty", stored ? legacyUncertaintyLimit : noteLimit],
+    ["blocker", noteLimit],
+  ] as const)
+    if (
+      value[field] !== undefined &&
+      (typeof value[field] !== "string" || value[field].length > max)
+    )
+      throw new Error(
+        `Invalid item ${field} (one line, at most ${max} characters).`,
+      );
+  const line = (text: string, max: number) =>
+    clean(text, max).replace(/\s+/g, " ").trim();
   if (
     value.proposedReply !== undefined &&
     (typeof value.proposedReply !== "string" ||
@@ -156,7 +176,10 @@ export function validateCandidate(
     person: clean(value.person, 240),
     summary: clean(value.summary),
     ...(value.uncertainty?.trim()
-      ? { uncertainty: clean(value.uncertainty, 2000).trim() }
+      ? { uncertainty: line(value.uncertainty, legacyUncertaintyLimit) }
+      : {}),
+    ...(value.blocker?.trim()
+      ? { blocker: line(value.blocker, noteLimit) }
       : {}),
     suggestion: clean(value.suggestion, 2000),
     ...(value.proposedReply !== undefined
@@ -269,7 +292,7 @@ export function validateState(value: State): State {
     );
   const keys = new Set<string>();
   for (const item of value.items) {
-    validateCandidate(item, item.source);
+    validateCandidate(item, item.source, true);
     if (
       !sources.includes(item.source) ||
       typeof item.account !== "string" ||
@@ -286,7 +309,9 @@ export function validateState(value: State): State {
       (["firstSeenAt", "reopenedAt", "decidedAt"] as const).some(
         (field) => item[field] !== undefined && !validDate(item[field]),
       ) ||
-      (item.decision !== undefined && !decisions.includes(item.decision))
+      (item.decision !== undefined && !decisions.includes(item.decision)) ||
+      (item.draftOrigin !== undefined &&
+        !draftOrigins.includes(item.draftOrigin))
     )
       throw new Error("Invalid Comms item. The existing file was left intact.");
     if (item.resolution !== undefined) {
@@ -341,7 +366,7 @@ export function ingest(
   startedAt: string,
   resolutions: Resolution[] = [],
   snapshot?: State,
-): void {
+): ProposalCounts {
   if (
     !(collectionSources as readonly string[]).includes(source) ||
     !account.trim() ||
@@ -372,6 +397,9 @@ export function ingest(
       Date.parse(entry.checkedAt) > Date.parse(startedAt),
   );
   let skippedResolutions = 0;
+  // Proposals are transient. Counting them makes a run with no drafts
+  // diagnosable: did the collector write none, or did a gate drop them?
+  const counts: ProposalCounts = { proposals: 0, seeded: 0 };
   for (const resolution of resolved) {
     const key = identity(source, account, resolution.sourceId);
     const current = state.items.find((item) => item.key === key);
@@ -392,6 +420,7 @@ export function ingest(
   for (const collected of candidates) {
     // A proposal is transient collector input, never a second saved reply.
     const { proposedReply, ...candidate } = collected;
+    if (proposedReply) counts.proposals++;
     const key = identity(source, account, candidate.sourceId);
     const current = state.items.find((item) => item.key === key);
     const expected = snapshot?.items.find((item) => item.key === key);
@@ -404,6 +433,7 @@ export function ingest(
           Date.parse(current.sourceUpdatedAt)
       ) {
         delete current.uncertainty;
+        delete current.blocker;
         Object.assign(current, candidate);
         delete current.resolution;
         current.draftStale = current.draftStale || Boolean(current.draft);
@@ -414,7 +444,7 @@ export function ingest(
     const draft =
       (source === "mail" || source === "teams") &&
       account !== "unverified" &&
-      !candidate.uncertainty &&
+      !candidate.blocker &&
       !newerCoverage
         ? proposedReply || ""
         : "";
@@ -428,8 +458,10 @@ export function ingest(
         draft,
         draftRevision: draft ? 1 : 0,
         draftStale: false,
+        ...(draft ? { draftOrigin: "triage" as const } : {}),
         firstSeenAt: startedAt,
       });
+      if (draft) counts.seeded++;
       continue;
     }
     const delta =
@@ -447,8 +479,9 @@ export function ingest(
       current.draft === "" &&
       current.draftRevision === 0 &&
       !current.draftStale;
-    // A refreshed assessment replaces prior uncertainty, including clearing it.
+    // A refreshed assessment replaces prior notes, including clearing them.
     delete current.uncertainty;
+    delete current.blocker;
     Object.assign(current, candidate);
     if (delta > 0) {
       // Newer activity starts a new open cycle on a closed item and ends any
@@ -466,7 +499,9 @@ export function ingest(
     }
     if (seedDraft) {
       current.draft = draft;
+      current.draftOrigin = "triage";
       current.draftRevision++;
+      counts.seeded++;
     }
   }
   const previous = state.coverage.find(
@@ -474,7 +509,7 @@ export function ingest(
   );
   // A slower, older run may merge items, but cannot overwrite newer coverage.
   if (previous && Date.parse(previous.checkedAt) > Date.parse(startedAt))
-    return;
+    return counts;
   if (account !== "unverified" && status === "complete")
     state.coverage = state.coverage.filter(
       (entry) =>
@@ -487,9 +522,17 @@ export function ingest(
     account,
     status,
     detail: clean(
-      skippedResolutions
-        ? `Skipped ${skippedResolutions} stale resolution(s): queue changed since collection started. ${detail}`
-        : detail,
+      [
+        source === "mail" || source === "teams"
+          ? `Drafts: ${counts.seeded} of ${counts.proposals} proposals seeded.`
+          : "",
+        skippedResolutions
+          ? `Skipped ${skippedResolutions} stale resolution(s): queue changed since collection started.`
+          : "",
+        detail,
+      ]
+        .filter(Boolean)
+        .join(" "),
       500,
     ),
     checkedAt: startedAt,
@@ -498,12 +541,15 @@ export function ingest(
   if (status === "complete") coverage.cursor = startedAt;
   if (previous) Object.assign(previous, coverage);
   else state.coverage.push(coverage);
+  return counts;
 }
+export type ProposalCounts = { proposals: number; seeded: number };
 export function setDraft(
   state: State,
   key: string,
   expectedRevision: number,
   draft: string,
+  origin: Exclude<DraftOrigin, "triage"> = "manual",
 ): void {
   const item = state.items.find((item) => item.key === key);
   if (!item || item.draftRevision !== expectedRevision)
@@ -515,6 +561,8 @@ export function setDraft(
   if (draft.length > 20000)
     throw new Error("Draft is too long (maximum 20,000 characters).");
   item.draft = clean(draft, 20000);
+  if (item.draft) item.draftOrigin = origin;
+  else delete item.draftOrigin;
   item.draftRevision++;
   item.draftStale = false;
 }
@@ -535,7 +583,7 @@ export function visibleItems(
         return false;
       if (view === "Waiting" && item.status !== "waiting") return false;
       if (view === "Next") return false;
-      return `${item.title}\n${item.person}\n${item.summary}\n${item.uncertainty || ""}\n${item.source}\n${item.account}`
+      return `${item.title}\n${item.person}\n${item.summary}\n${item.uncertainty || ""}\n${item.blocker || ""}\n${item.source}\n${item.account}`
         .toLowerCase()
         .includes(query.toLowerCase());
     })

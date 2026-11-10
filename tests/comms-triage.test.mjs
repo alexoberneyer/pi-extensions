@@ -842,10 +842,8 @@ test("prompt inlines canonical rules and evidence but never includes local draft
     prompt,
     /"uncertainty":"Calendar availability has not been checked\."/,
   );
-  assert.match(
-    prompt,
-    /Put missing checks, uncertain ownership and unverified replies in uncertainty/,
-  );
+  assert.match(prompt, /Put missing facts, unreadable evidence/);
+  assert.doesNotMatch(prompt, /Preserve unresolved uncertainty/);
   assert.match(prompt, /one immediate action/);
   assert.match(prompt, /absolute dates for deadlines/);
   for (const rule of [

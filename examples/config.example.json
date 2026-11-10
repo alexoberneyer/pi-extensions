@@ -19,6 +19,7 @@
     "notesDirectory": null,
     "triageInstructions": null,
     "messageInstructions": null,
+    "voiceInstructions": null,
     "reminderList": "Next"
   },
   "workstation": {

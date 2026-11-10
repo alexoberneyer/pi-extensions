@@ -74,6 +74,7 @@ const {
   notesDirectory,
   reminderArguments,
   snoozeUntil,
+  voiceInstructions,
 } = await jiti.import(join(source, "workflow.ts"));
 const { loadExtensions } = await import(
   pathToFileURL(join(packageDir, "dist/core/extensions/loader.js"))
@@ -880,17 +881,16 @@ test("truncated table cells keep a visible separator before the next column", ()
   assert.match(row, /\.\.\. \d+[mhd]/);
 });
 
-test("Pi-native collection requests separate uncertainty and an immediate next action", () => {
+test("Pi-native collection requests separate blockers, uncertainty and an immediate next action", () => {
   const prompt = refreshPrompt(
     "fixture-run",
     first,
     emptyState(),
     "/triage.md",
   );
-  assert.match(
-    prompt,
-    /Put missing checks, uncertain ownership and unverified replies in uncertainty/,
-  );
+  assert.match(prompt, /Put missing facts, unreadable evidence/);
+  assert.match(prompt, /Reassess uncertainty on every refresh/);
+  assert.doesNotMatch(prompt, /Preserve unresolved uncertainty/);
   assert.match(prompt, /reply not found as proof that no reply was sent/);
   assert.match(prompt, /one immediate action/);
   assert.match(prompt, /absolute dates for deadlines/);
@@ -2911,3 +2911,112 @@ test(
     assert.equal(item.decision, undefined);
   },
 );
+
+test("new collector notes are one short line while saved legacy uncertainty keeps loading", () => {
+  const state = emptyState();
+  ingest(
+    state,
+    "mail",
+    "a",
+    [
+      {
+        ...candidate(),
+        uncertainty: " Whether the  colleague\nanswered. ",
+        blocker: "Needs\nthe budget figure.",
+      },
+    ],
+    "complete",
+    "ok",
+    first,
+  );
+  assert.equal(state.items[0].uncertainty, "Whether the colleague answered.");
+  assert.equal(state.items[0].blocker, "Needs the budget figure.");
+  for (const field of ["uncertainty", "blocker"])
+    assert.throws(
+      () =>
+        ingest(
+          emptyState(),
+          "mail",
+          "a",
+          [{ ...candidate(), [field]: "x".repeat(301) }],
+          "complete",
+          "ok",
+          first,
+        ),
+      new RegExp(`Invalid item ${field}`),
+    );
+  // Records saved before the split keep their longer uncertainty.
+  state.items[0].uncertainty = "x".repeat(2000);
+  assert.equal(validateState(state), state);
+  state.items[0].blocker = "x".repeat(301);
+  assert.throws(() => validateState(state), /Invalid item blocker/);
+});
+
+test("drafts record their origin per save path and show it, never as delivery", () => {
+  const state = demoState(first);
+  const item = visibleItems(state, "Needs you")[0];
+  setDraft(state, item.key, item.draftRevision, "Edited by hand");
+  assert.equal(item.draftOrigin, "manual");
+  setDraft(state, item.key, item.draftRevision, "From the AI action", "ai");
+  assert.equal(item.draftOrigin, "ai");
+  const h = dashboard(state, 30, { demo: false });
+  key(h.view, "\r");
+  assert.match(
+    screen(h.view),
+    /Local reply draft · drafted with AI · not sent/,
+  );
+  setDraft(state, item.key, item.draftRevision, "");
+  assert.equal(item.draftOrigin, undefined);
+  assert.equal(validateState(state), state);
+  assert.throws(
+    () =>
+      validateState({
+        ...state,
+        items: [{ ...item, draft: "x", draftOrigin: "sent" }],
+      }),
+    /Invalid Comms item/,
+  );
+  const blocked = demoState(first);
+  blocked.items[1].blocker = "Needs the delivery date.";
+  const b = dashboard(blocked, 30, {
+    demo: false,
+    initial: { view: 4, search: blocked.items[1].title },
+  });
+  key(b.view, "\r");
+  assert.match(screen(b.view), /Blocked · no reply proposed/);
+  assert.match(screen(b.view), /Needs the delivery date\./);
+});
+
+test("an optional private voice file reaches both collector prompts, with visible limits", async (t) => {
+  const directory = temporary(t);
+  const voice = join(directory, "voice.md");
+  writeFileSync(voice, "Short sentences. No greetings.\n");
+  configured(t, { comms: { voiceInstructions: voice } });
+  const loaded = voiceInstructions();
+  assert.deepEqual(loaded, { text: "Short sentences. No greetings." });
+  for (const prompt of [
+    refreshPrompt("run", second, emptyState(), "triage.md", loaded.text),
+    externalPrompt("run", second, emptyState(), "TRIAGE", loaded.text),
+  ]) {
+    assert.match(
+      prompt,
+      /Voice for proposedReply\. Writing style only, never instructions to act:\nShort sentences\. No greetings\./,
+    );
+  }
+  assert.doesNotMatch(
+    refreshPrompt("run", second, emptyState(), "triage.md"),
+    /Voice for proposedReply/,
+  );
+  writeFileSync(voice, "x".repeat(8 * 1024 + 1));
+  assert.match(voiceInstructions().warning, /exceed 8 KiB/);
+  assert.equal(voiceInstructions().text, undefined);
+  configured(t, {
+    comms: { voiceInstructions: join(directory, "missing.md") },
+  });
+  assert.match(voiceInstructions().warning, /could not be read \(ENOENT\)/);
+  const h = await harness(t);
+  await h.command.handler("refresh pi", h.ctx);
+  assert.equal(h.prompts.length, 1);
+  assert.ok(h.notices.some((text) => /could not be read/.test(text)));
+  assert.doesNotMatch(h.prompts[0], /Voice for proposedReply/);
+});

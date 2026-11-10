@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Remove the Comms reply wrapper. Copy the draft and open the original to send it.
+- Stop collecting meeting follow-ups and reMarkable captures in Comms. Saved items still load. Their configuration keys are still accepted.
 - Make Agents' Needs you view a global attention queue with project context and explicit reasons.
 - Keep queue selection stable during refresh and require reselection when the selected session leaves.
 

@@ -19,10 +19,7 @@
     "notesDirectory": null,
     "triageInstructions": null,
     "messageInstructions": null,
-    "meetingInstructions": null,
-    "reminderList": "Next",
-    "remarkableSource": null,
-    "notebookName": "Scratchpad"
+    "reminderList": "Next"
   },
   "workstation": {
     "memory": false,

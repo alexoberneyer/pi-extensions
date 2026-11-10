@@ -65,10 +65,6 @@ const item = (id = "one", updated = first) => ({
   suggestion: "Review and reply",
   priority: 1,
 });
-const meeting = () => ({
-  ...item("11111111222233334444555555555555"),
-  url: "https://www.notion.so/Meeting-11111111222233334444555555555555",
-});
 const resolution = (overrides = {}) => ({
   sourceId: "one",
   sourceUpdatedAt: first,
@@ -226,12 +222,12 @@ test("structured results fill missing sources and known accounts without claimin
   const previous = emptyState();
   ingest(previous, "mail", "second-account", [], "complete", "prior", first);
   const rows = parseTriage(payload(), "fixture-run", previous);
-  assert.equal(rows.length, 6);
+  assert.equal(rows.length, 5);
   assert.equal(
     rows.find((row) => row.account === "second-account").status,
     "unavailable",
   );
-  for (const source of ["teams", "calendar", "notion", "meetings"])
+  for (const source of ["teams", "calendar", "notion"])
     assert.equal(
       rows.find((row) => row.source === source).status,
       "unavailable",
@@ -259,39 +255,17 @@ test("invalid envelopes and unattributable results still reject the whole run", 
     assert.throws(() => parseTriage(bad, "fixture-run", emptyState()));
 });
 
-test("meeting schema requires original IDs and Notion links while ordinary links stay optional", () => {
+test("the schema has no meeting source and ordinary links stay optional", () => {
   assert.equal(Check(triageSchema, payload()), true);
-  for (const url of [
-    meeting().url,
-    "https://notion.so/11111111222233334444555555555555",
-    "https://workspace.notion.site/11111111222233334444555555555555",
-  ]) {
-    const data = payload([
-      result({ source: "meetings", items: [{ ...meeting(), url }] }),
-    ]);
-    assert.equal(Check(triageSchema, data), true);
-    const args = claudeArgs();
-    assert.deepEqual(
-      JSON.parse(args[args.indexOf("--json-schema") + 1]),
-      JSON.parse(JSON.stringify(triageSchema)),
-    );
-  }
-  for (const changes of [
-    { url: undefined },
-    { url: "" },
-    { url: "http://notion.so/11111111222233334444555555555555" },
-    { url: "https://example.com/11111111222233334444555555555555" },
-    { sourceId: "invented-action" },
-  ])
-    assert.equal(
-      Check(
-        triageSchema,
-        payload([
-          result({ source: "meetings", items: [{ ...meeting(), ...changes }] }),
-        ]),
-      ),
-      false,
-    );
+  const args = claudeArgs();
+  assert.deepEqual(
+    JSON.parse(args[args.indexOf("--json-schema") + 1]),
+    JSON.parse(JSON.stringify(triageSchema)),
+  );
+  assert.equal(
+    Check(triageSchema, payload([result({ source: "meetings", items: [] })])),
+    false,
+  );
 });
 
 test("structured uncertainty is optional, validated and retained through collection", () => {
@@ -316,11 +290,6 @@ test("structured uncertainty is optional, validated and retained through collect
 test("identical request records collapse after normalization without losing complete coverage", () => {
   for (const [source, candidate, duplicate] of [
     ["mail", item(), { ...item(), sourceUpdatedAt: "2026-10-19T08:00:00Z" }],
-    [
-      "meetings",
-      meeting(),
-      { ...meeting(), sourceId: "11111111-2222-3333-4444-555555555555" },
-    ],
   ]) {
     const state = emptyState();
     const rows = parseTriage(
@@ -407,16 +376,6 @@ test("invalid source results become unavailable without importing any of their i
     result({ items: [{ ...item(), url: "javascript:alert(1)" }] }),
     result({ items: [{ ...item(), title: "x".repeat(241) }] }),
     result({ items: [null] }),
-    result({ source: "meetings", items: [{ ...meeting(), url: undefined }] }),
-    result({
-      source: "meetings",
-      items: [
-        {
-          ...meeting(),
-          url: "https://notion.so/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        },
-      ],
-    }),
   ]) {
     const state = emptyState();
     ingest(state, bad.source, bad.account, [], "partial", "prior", first);
@@ -900,9 +859,14 @@ test("prompt inlines canonical rules and evidence but never includes local draft
     assert.ok(prompt.includes(rule), rule);
 });
 
-test("meeting reads are reviewed but transcript fetches fail closed", () => {
-  for (const name of ["notion-query-meeting-notes", "notion-get-tool-access"])
-    assert.ok(readTools.includes(`mcp__claude_ai_Notion__${name}`));
+test("meeting-note queries are not permitted and transcript fetches fail closed", () => {
+  assert.ok(
+    readTools.includes("mcp__claude_ai_Notion__notion-get-tool-access"),
+  );
+  assert.equal(
+    readTools.includes("mcp__claude_ai_Notion__notion-query-meeting-notes"),
+    false,
+  );
   for (const include_transcript of [true, "true", "false", null])
     assert.equal(
       decision({
@@ -917,68 +881,6 @@ test("meeting reads are reviewed but transcript fetches fail closed", () => {
       tool_input: { include_transcript: false },
     }).hookSpecificOutput.permissionDecision,
     "allow",
-  );
-});
-
-test("meeting and ticket coverage advance independently, including omitted meeting results", () => {
-  const state = emptyState();
-  for (const source of ["notion", "meetings"])
-    ingest(state, source, "same-account", [], "complete", "prior", first);
-  const rows = parseTriage(
-    payload([
-      result({ source: "notion", account: "same-account", items: [] }),
-      result({
-        source: "meetings",
-        account: "same-account",
-        items: [],
-        status: "partial",
-      }),
-    ]),
-    "fixture-run",
-    state,
-  );
-  mergeTriage(state, rows, second);
-  assert.equal(
-    state.coverage.find((row) => row.source === "notion").cursor,
-    second,
-  );
-  assert.equal(
-    state.coverage.find((row) => row.source === "meetings").cursor,
-    first,
-  );
-  const omitted = parseTriage(
-    payload([result({ source: "notion", account: "same-account", items: [] })]),
-    "fixture-run",
-    state,
-  );
-  assert.equal(
-    omitted.find((row) => row.source === "meetings").status,
-    "unavailable",
-  );
-});
-
-test("both collectors share the canonical meeting reference with read-only overrides", () => {
-  const prompt = externalPrompt(
-    "fixture-run",
-    second,
-    emptyState(),
-    "TRIAGE",
-    "SHARED-MEETING-SKILL",
-  );
-  for (const text of [
-    "SHARED-MEETING-SKILL",
-    "last_edited_time",
-    "include_transcript: false",
-    "50 rows",
-    "one review candidate per actionable meeting",
-    "Do NOT execute its filing workflow",
-    "Never copy transcripts",
-    "not the user's promise",
-  ])
-    assert.ok(prompt.includes(text), text);
-  assert.match(
-    externalPrompt("fixture-run", second, emptyState(), "TRIAGE"),
-    /meetings.*unavailable/,
   );
 });
 
@@ -1001,7 +903,7 @@ test("fake Claude streams structured results over stdin without parent auth mark
     request(fake.dir, { progress: (text) => progress.push(text) }),
   );
   assert.equal(rows[0].items[0].sourceId, "one");
-  assert.equal(rows.length, 5);
+  assert.equal(rows.length, 4);
   assert.match(progress[0], /get_me/);
   const call = JSON.parse(readFileSync(join(fake.dir, "request.json"), "utf8"));
   assert.equal(call.claudecode, undefined);
@@ -1176,11 +1078,12 @@ test("default refresh runs Claude without touching the Pi prompt or blocking par
   await h.emit("agent_settled"); // Parent settlement must not cancel external work.
   await until(() => !existsSync(join(h.store.directory, "triage.lock")));
   assert.equal(h.store.read().items.length, 1);
-  assert.equal(h.store.read().coverage.length, 5);
+  assert.equal(h.store.read().coverage.length, 4);
   assert.ok(h.statuses.some((text) => text.includes("Claude triage finished")));
   assert.equal(h.ctx.ui.getEditorText(), "My existing prompt");
   const call = JSON.parse(readFileSync(join(h.dir, "request.json"), "utf8"));
-  assert.match(call.prompt, /CANONICAL-MEETING-REFERENCE/);
+  assert.doesNotMatch(call.prompt, /CANONICAL-MEETING-REFERENCE/);
+  assert.match(call.prompt, /Meeting notes are not a Comms source/);
 });
 
 test("default Claude refresh imports explicit resolutions into the real extension store", async (t) => {
@@ -1252,22 +1155,6 @@ test("Pi-native refresh applies the shared resolution contract and protects its 
   }
 });
 
-test("an unreadable optional meeting skill leaves other sources collectable", async (t) => {
-  const h = await externalHarness(t);
-  const skill = join(h.ctx.cwd, ".claude/skills/paste-meetings/SKILL.md");
-  rmSync(skill);
-  mkdirSync(skill);
-  await h.command("refresh");
-  await until(() => !existsSync(join(h.store.directory, "triage.lock")));
-  const state = h.store.read();
-  assert.equal(state.items.length, 1);
-  const meetings = state.coverage.find((row) => row.source === "meetings");
-  assert.equal(meetings.status, "unavailable");
-  assert.equal(meetings.cursor, undefined);
-  const call = JSON.parse(readFileSync(join(h.dir, "request.json"), "utf8"));
-  assert.match(call.prompt, /missing or unreadable/);
-});
-
 test("repeated refresh shows progress without another worker and cancellation leaves the queue unchanged", async (t) => {
   const h = await externalHarness(t, { wait: true });
   h.store.update((state) =>
@@ -1337,61 +1224,6 @@ test("failed external runs retain the last queue and expose failure status", asy
   assert.equal(readFileSync(h.store.file, "utf8"), before);
   assert.ok(h.statuses.some((text) => text.includes("invalid event stream")));
   assert.ok(h.statuses.every((text) => !text.startsWith("Error:")));
-});
-
-test("a malformed meeting result still saves valid sources and exposes failed coverage", async (t) => {
-  const h = await externalHarness(t, {
-    data: {
-      results: [
-        result({ items: [item("fresh", second)] }),
-        result({ source: "teams", items: [item(), item()] }),
-        result({ source: "calendar", items: [] }),
-        result({ source: "notion", items: [] }),
-        result({
-          source: "meetings",
-          items: [{ ...meeting(), url: undefined }],
-        }),
-      ],
-    },
-  });
-  h.store.update((state) =>
-    ingest(
-      state,
-      "meetings",
-      "work@example.invalid",
-      [],
-      "complete",
-      "prior",
-      first,
-    ),
-  );
-  await h.command("refresh");
-  await until(() => !existsSync(join(h.store.directory, "triage.lock")));
-  const state = h.store.read();
-  assert.deepEqual(
-    state.items.map((row) => row.source),
-    ["mail", "teams"],
-  );
-  assert.equal(state.coverage.length, 5);
-  const coverage = state.coverage.find((row) => row.source === "meetings");
-  assert.equal(coverage.status, "unavailable");
-  assert.equal(coverage.cursor, first);
-  assert.match(coverage.detail, /original Notion page link/);
-  assert.ok(
-    state.coverage
-      .filter((row) => row.source !== "meetings")
-      .every((row) => row.status === "complete" && row.cursor > first),
-  );
-  assert.equal(h.notifications.at(-1).level, "warning");
-  assert.match(
-    h.notifications.at(-1).text,
-    /1 incomplete source\/account checks/,
-  );
-  await h.command("status");
-  assert.match(
-    h.notices.at(-1),
-    /meetings.*unavailable[\s\S]*original Notion page link/,
-  );
 });
 
 test("help and invalid arguments show guidance without starting work or reporting an error", async (t) => {
@@ -1504,7 +1336,6 @@ test("default external refresh uses bundled workflows without a notes checkout a
   assert.equal(call.cwd, root);
   for (const text of [
     "Communication triage",
-    "Meeting follow-ups",
     "Synthetic User",
     "Pacific/Auckland",
     "Synthetic Actions",

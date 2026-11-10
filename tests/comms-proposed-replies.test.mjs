@@ -361,17 +361,9 @@ test("a newer source/account collection prevents delayed proposals even when an 
 });
 
 test("unsupported sources keep actionable items but ignore otherwise valid proposals", () => {
-  const page = "11111111222233334444555555555555";
-  for (const source of ["calendar", "notion", "meetings"]) {
+  for (const source of ["calendar", "notion"]) {
     const state = emptyState();
-    const items = [
-      candidate({
-        proposedReply: reply,
-        ...(source === "meetings"
-          ? { sourceId: page, url: `https://www.notion.so/${page}` }
-          : {}),
-      }),
-    ];
+    const items = [candidate({ proposedReply: reply })];
     const rows = parseTriage(
       payload([result({ source, items })]),
       "synthetic-run",

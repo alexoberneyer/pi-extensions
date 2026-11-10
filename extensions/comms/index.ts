@@ -4,11 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { packagePath, readConfig } from "../../lib/config.mjs";
-import {
-  approvalStatus,
-  initializeApproval,
-  requireApproval,
-} from "../approval/ready.ts";
+import { approvalStatus, initializeApproval } from "../approval/ready.ts";
 import {
   copyToClipboard,
   getAgentDir,
@@ -33,6 +29,7 @@ import {
   ingest,
   setDraft,
   collectionSources,
+  legacySources,
   validateCandidates,
   type Resolution,
   type Candidate,
@@ -50,56 +47,25 @@ import {
 import { openSourceLink } from "./source-link.ts";
 import {
   canonical,
+  collectedCoverage,
   draftPrompt,
-  meetingInstructions,
-  meetingRequest,
-  notesRequest,
   notesDirectory,
   refreshPrompt,
   reminderArguments,
   snoozeUntil,
 } from "./workflow.ts";
 
-import {
-  captureActions,
-  claimCaptureRoute,
-  captureArguments,
-  captureBase,
-  captureBatchSize,
-  captureItem,
-  capturePrompt,
-  changedPages,
-  mergeCapture,
-  parseManifest,
-  reviewCapture,
-  routeCapture,
-  transcriptionSchema,
-  type Manifest,
-  type Page,
-} from "./remarkable.ts";
-
-import {
-  ReplyJob,
-  microsoftRead,
-  replyOperation,
-  replyPrompt,
-  replySchema,
-  replyTool,
-} from "./reply.ts";
-
 const runFile = promisify(execFile);
 const commandHelp = `Comms commands:
 /comms: open the saved queue
 /comms refresh: collect through Claude
 /comms refresh pi: collect in this Pi conversation
-/comms capture remarkable: capture scratchpad for review
 /comms cancel: stop this session's Claude collector
 /comms next: read the configured Reminders list
 /comms status: show coverage and failures
 /comms demo: open disposable demo data
 /comms help: show this help`;
 type Job =
-  | ReplyJob
   | {
       kind: "refresh";
       id: string;
@@ -107,17 +73,7 @@ type Job =
       state: State;
       completed: Set<string>;
     }
-  | { kind: "draft"; key: string; revision: number; revoked?: boolean }
-  | {
-      kind: "capture";
-      id: string;
-      startedAt: string;
-      base: string;
-      manifest?: Manifest;
-      pages: Page[];
-      saved: boolean;
-      revoked?: boolean;
-    };
+  | { kind: "draft"; key: string; revision: number; revoked?: boolean };
 function result(value: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value) }],
@@ -127,13 +83,7 @@ function result(value: unknown) {
 
 export default async function comms(pi: ExtensionAPI) {
   await initializeApproval(pi);
-  const toolNames = [
-    "comms_snapshot",
-    "comms_ingest",
-    "comms_save_draft",
-    "comms_save_capture",
-    replyTool,
-  ];
+  const toolNames = ["comms_snapshot", "comms_ingest", "comms_save_draft"];
   const authorized = new Set<string>();
   function activateTools(...names: string[]): void {
     for (const name of names) authorized.add(name);
@@ -174,10 +124,9 @@ export default async function comms(pi: ExtensionAPI) {
     | undefined;
   let queuedReturn: typeof returnToQueue;
   let queueNotice = "";
-  let retiringReply: ReplyJob | undefined;
   let uiWaiting = false;
-  function revokeReply(): void {
-    if (job?.kind === "reply" || job?.kind === "draft") job.revoked = true;
+  function revokeReturn(): void {
+    if (job?.kind === "draft") job.revoked = true;
     if (returnToQueue) returnToQueue.revoked = true;
     queuedReturn = undefined;
   }
@@ -199,19 +148,13 @@ export default async function comms(pi: ExtensionAPI) {
       !ctx.ui.getEditorText().trim()
     );
   }
-  function finishReply(): void {
-    if (job?.kind === "reply") {
-      retiringReply = job;
-      job.finish();
-    }
-  }
   pi.on("input", (event) => {
     queuedReturn = undefined;
     if (
       returnToQueue &&
       !(event.source === "extension" && event.text === returnToQueue.prompt)
     )
-      revokeReply();
+      revokeReturn();
   });
   pi.on("before_agent_start", (event) => {
     queuedReturn = undefined;
@@ -221,7 +164,7 @@ export default async function comms(pi: ExtensionAPI) {
         : event.message?.customType === "comms-selected-action"
           ? event.message.content
           : undefined;
-    if (returnToQueue && prompt !== returnToQueue.prompt) revokeReply();
+    if (returnToQueue && prompt !== returnToQueue.prompt) revokeReturn();
   });
   pi.on("ui_prompt_start", () => {
     uiWaiting = true;
@@ -230,14 +173,14 @@ export default async function comms(pi: ExtensionAPI) {
     uiWaiting = false;
   });
   pi.on("user_bash", () => {
-    revokeReply();
+    revokeReturn();
   });
   pi.on("message_end", (event) => {
     if (
       event.message.role === "assistant" &&
       ["error", "aborted"].includes(event.message.stopReason)
     )
-      revokeReply();
+      revokeReturn();
   });
   for (const event of [
     "session_before_switch",
@@ -245,15 +188,11 @@ export default async function comms(pi: ExtensionAPI) {
     "session_before_tree",
     "session_tree",
   ] as const)
-    pi.on(event, () => revokeReply());
+    pi.on(event, () => revokeReturn());
 
   pi.events.on("dotfiles:plan-mode", (value) => {
     planning = value === true;
-    if (planning) revokeReply();
-    if (planning && job?.kind === "capture") {
-      job.revoked = true;
-      subprocess?.abort();
-    }
+    if (planning) revokeReturn();
   });
   pi.on("session_start", () => {
     active = true;
@@ -261,8 +200,7 @@ export default async function comms(pi: ExtensionAPI) {
   });
   pi.on("session_shutdown", async () => {
     active = false;
-    revokeReply();
-    finishReply();
+    revokeReturn();
     returnToQueue = undefined;
     deactivateTools();
     job = undefined;
@@ -273,13 +211,11 @@ export default async function comms(pi: ExtensionAPI) {
   });
   pi.on("agent_settled", (event, ctx) => {
     const back = returnToQueue;
-    if (back && job?.kind === "reply") back.notice = job.notice;
-    if (back && job?.kind === "draft")
+    if (back && job?.kind === "draft") {
       back.notice =
         "AI drafting finished. Review the saved local text; nothing was sent.";
-    if (back && (job?.kind === "reply" || job?.kind === "draft") && job.revoked)
-      back.revoked = true;
-    finishReply();
+      if (job.revoked) back.revoked = true;
+    }
     job = undefined;
     returnToQueue = undefined;
     deactivateTools(toolNames.filter((name) => name !== "comms_snapshot"));
@@ -297,20 +233,10 @@ export default async function comms(pi: ExtensionAPI) {
       expandPromptTemplates: true,
     });
   });
-  pi.on("tool_result", (event) => {
-    if (job?.kind !== "reply" || event.isError) return;
-    const tool = pi.getAllTools().find((tool) => tool.name === event.toolName);
-    if (microsoftRead(event.toolName, tool)) job.reads.add(event.toolCallId);
-  });
 
   // The triage/drafting pass cannot perform external writes, including nested
   // codemode calls. This guard is a workflow boundary, not an OS sandbox.
-  pi.on("tool_call", (event, ctx) => {
-    if (retiringReply?.owns(event))
-      return {
-        block: true,
-        reason: "Reply authorization revoked by lifecycle change.",
-      };
+  pi.on("tool_call", (event) => {
     if (
       toolNames.includes(event.toolName) &&
       (!active || !authorized.has(event.toolName))
@@ -321,27 +247,6 @@ export default async function comms(pi: ExtensionAPI) {
           "Activate the required tool through a user /comms action first.",
       };
     if (!job) return;
-    if (job.kind === "reply") {
-      try {
-        job.guard(event, ctx, pi);
-      } catch (error) {
-        return { block: true, reason: errorMessage(error) };
-      }
-      return;
-    }
-    if (job.kind === "capture") {
-      if (event.toolName === "comms_save_capture") return;
-      if (
-        event.toolName === "read" &&
-        job.pages.some((page) => page.image === event.input?.path)
-      )
-        return;
-      return {
-        block: true,
-        reason:
-          "Scratchpad capture only reads its selected page images and saves local review evidence. Other tools are blocked.",
-      };
-    }
     if (
       job.kind === "refresh" &&
       /(?:^|__)notion[-_]fetch$/.test(event.toolName) &&
@@ -379,7 +284,7 @@ export default async function comms(pi: ExtensionAPI) {
     return {
       block: true,
       reason:
-        "Comms collection/drafting is read-only. Unclassified tools and external writes are blocked. Finish this pass, then use the reviewed /message handoff.",
+        "Comms collection/drafting is read-only. Unclassified tools and external writes are blocked. Finish this pass, then copy the draft and open the original.",
     };
   });
 
@@ -392,35 +297,21 @@ export default async function comms(pi: ExtensionAPI) {
     parameters: Type.Object({}),
     annotations: { readOnlyHint: true },
     async execute() {
-      if (
-        !active ||
-        !authorized.has("comms_snapshot") ||
-        job?.kind === "capture"
-      )
+      if (!active || !authorized.has("comms_snapshot"))
         throw new Error(
           "Open /comms or start /comms refresh pi before reading the queue.",
         );
       const state = store().read();
-      if (job?.kind === "reply") {
-        const selected = job.item;
-        return result({
-          ...state,
-          items: state.items.filter((item) => item.key === selected.key),
-          coverage: state.coverage.filter(
-            (row) =>
-              row.source === selected.source &&
-              row.account === selected.account,
-          ),
-        });
-      }
       return result(
         job?.kind === "refresh"
           ? {
               ...state,
-              items: state.items.filter((item) => item.source !== "remarkable"),
-              coverage: state.coverage.filter(
-                (entry) => entry.source !== "remarkable",
+              // Collectors see only sources they can refresh.
+              items: state.items.filter(
+                (item) =>
+                  !(legacySources as readonly string[]).includes(item.source),
               ),
+              coverage: collectedCoverage(state),
             }
           : state,
       );
@@ -516,89 +407,11 @@ export default async function comms(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "comms_save_capture",
-    defaultActive: false,
-    label: "Save scratchpad review",
-    description:
-      "Save up to five page transcriptions from the active, explicitly requested /comms capture remarkable. Creates local review evidence only, never reminders or replies.",
-    parameters: transcriptionSchema,
-    async execute(_id, args, signal) {
-      const current = job;
-      if (
-        planning ||
-        !active ||
-        !authorized.has("comms_save_capture") ||
-        current?.kind !== "capture" ||
-        current.revoked ||
-        current.id !== args.runId ||
-        !current.manifest
-      )
-        throw new Error(
-          "Start /comms capture remarkable before saving page transcriptions.",
-        );
-      signal?.throwIfAborted();
-      if (current.saved) throw new Error("This capture was already saved.");
-      const state = store().update((state) =>
-        mergeCapture(
-          state,
-          current.manifest!,
-          current.pages,
-          args.pages,
-          current.base,
-          current.startedAt,
-        ),
-      );
-      current.saved = true;
-      const item = captureItem(state)!;
-      return result({
-        saved: true,
-        pages: args.pages.length,
-        pending: item.remarkable!.pending,
-        next: "Open /comms to review. No reminders were added.",
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: replyTool,
-    defaultActive: false,
-    exposure: "model-only",
-    executionMode: "sequential",
-    label: "Deliver selected Comms reply",
-    description:
-      "One-shot selected-item reply, after fresh read verification. Uses the bundled exact-payload approval guard for one Teams send or Outlook draft; never sends email. Unsupported tools/schemas stay local. Verification is model judgment.",
-    parameters: replySchema,
-    reachesTools: (input) =>
-      typeof input.writeTool === "string" ? [input.writeTool] : [],
-    async execute(id, args, signal, _onUpdate, ctx) {
-      if (
-        !active ||
-        planning ||
-        !authorized.has(replyTool) ||
-        job?.kind !== "reply"
-      )
-        throw new Error("Select Review & send/create draft in /comms first.");
-      const current = job;
-      const outcome = await current.deliver(id, args, signal, ctx, pi);
-      if (
-        active &&
-        !current.revoked &&
-        ctx.sessionManager.getSessionId() === current.sessionId
-      )
-        ctx.ui.notify(
-          outcome.content[0].text,
-          outcome.isError ? "warning" : "info",
-        );
-      return outcome;
-    },
-  });
-
   function runningJob(): string | undefined {
     if (external)
       return `${external.status}\nClaude triage is already running. Use /comms cancel to stop it.`;
     if (job)
-      return `Comms ${job.kind === "draft" ? "drafting" : job.kind === "reply" ? "reply" : job.kind === "capture" ? "scratchpad capture" : "Pi-native triage"} is already running in Pi. Press Escape in Pi to stop it. /comms cancel only stops Claude triage.`;
+      return `Comms ${job.kind === "draft" ? "drafting" : "Pi-native triage"} is already running in Pi. Press Escape in Pi to stop it. /comms cancel only stops Claude triage.`;
     return undefined;
   }
   function canStart(ctx: ExtensionCommandContext): void {
@@ -653,7 +466,6 @@ export default async function comms(pi: ExtensionAPI) {
           startedAt,
           state: requestState,
           instructions,
-          meetings: meetingInstructions(),
           signal: controller.signal,
           progress: publish,
         });
@@ -715,13 +527,7 @@ export default async function comms(pi: ExtensionAPI) {
     try {
       activateTools("comms_snapshot", "comms_ingest");
       pi.sendUserMessage(
-        refreshPrompt(
-          current.id,
-          current.startedAt,
-          state,
-          file,
-          meetingInstructions(),
-        ),
+        refreshPrompt(current.id, current.startedAt, state, file),
       );
     } catch (error) {
       job = undefined;
@@ -755,146 +561,6 @@ export default async function comms(pi: ExtensionAPI) {
       returnToQueue = undefined;
       deactivateTools(["comms_save_draft"]);
       throw error;
-    }
-  }
-  function startReply(ctx: ExtensionCommandContext, item: Item): void {
-    canStart(ctx);
-    if (requireApproval(pi).planning)
-      throw new Error("Leave /plan mode before replying.");
-    const supported = pi.getAllTools().some((tool) => {
-      const op = replyOperation(tool);
-      return item.source === "mail"
-        ? op === "outlook_create_draft"
-        : item.source === "teams" &&
-            Boolean(op) &&
-            op !== "outlook_create_draft";
-    });
-    if (!supported)
-      throw new Error(
-        "No supported connected reply tool. Saved text/copy remains available; no connector setup was attempted.",
-      );
-    const prompt = replyPrompt(item, canonical("message"));
-    const current = new ReplyJob(
-      store(),
-      item,
-      ctx.sessionManager.getSessionId(),
-    );
-    job = current;
-    returnToQueue = {
-      id: randomUUID(),
-      sessionId: current.sessionId,
-      prompt,
-      revoked: false,
-    };
-    try {
-      activateTools(replyTool);
-      sendSelectedAction(prompt);
-    } catch (error) {
-      current.finish();
-      job = undefined;
-      returnToQueue = undefined;
-      deactivateTools([replyTool]);
-      throw error;
-    }
-  }
-  async function startCapture(ctx: ExtensionCommandContext): Promise<void> {
-    canStart(ctx);
-    if (process.platform !== "darwin")
-      throw new Error(
-        "Scratchpad capture requires this Mac's reMarkable desktop copy.",
-      );
-    const queue = store();
-    const previous = captureItem(queue.read());
-    const script = packagePath("helpers", "remarkable.py");
-    if (!existsSync(script))
-      throw new Error(`Missing reMarkable reader: ${script}`);
-    const current: Extract<Job, { kind: "capture" }> = {
-      kind: "capture",
-      id: randomUUID(),
-      startedAt: new Date().toISOString(),
-      base: captureBase(previous),
-      pages: [],
-      saved: false,
-    };
-    job = current;
-    const controller = new AbortController();
-    subprocess = controller;
-    try {
-      const output = join(queue.directory, "remarkable-pages");
-      ctx.ui.notify(
-        "Reading scratchpad from the reMarkable desktop copy…",
-        "info",
-      );
-      const { stdout } = await runFile(
-        "uv",
-        captureArguments(output, previous?.sourceId),
-        {
-          cwd: packagePath(),
-          timeout: 60000,
-          maxBuffer: 4 * 1024 * 1024,
-          signal: controller.signal,
-        },
-      );
-      controller.signal.throwIfAborted();
-      if (!active || planning || current.revoked || job !== current)
-        throw new Error("Scratchpad capture stopped before transcription.");
-      const manifest = parseManifest(JSON.parse(stdout), output);
-      if (previous && manifest.notebookId !== previous.sourceId)
-        throw new Error(
-          "The reader returned a different notebook than the pinned scratchpad.",
-        );
-      current.manifest = manifest;
-      current.pages = changedPages(manifest, previous).slice(
-        0,
-        captureBatchSize,
-      );
-      ctx.ui.notify(
-        `Desktop copy newest change: ${manifest.newestChangeAt}. Tablet sync is unverified.`,
-        "info",
-      );
-      if (!current.pages.length) {
-        queue.update((state) =>
-          mergeCapture(
-            state,
-            manifest,
-            [],
-            [],
-            current.base,
-            current.startedAt,
-          ),
-        );
-        job = undefined;
-        ctx.ui.notify(
-          "No page transcriptions changed. Scratchpad status and routed actions were preserved. Open /comms to review.",
-          "info",
-        );
-        return;
-      }
-      if (
-        !ctx.isIdle() ||
-        ctx.hasPendingMessages() ||
-        ctx.ui.getEditorText().trim()
-      )
-        throw new Error(
-          "Pending input appeared during capture. Your prompt was left intact. Run capture again when idle.",
-        );
-      if (
-        current.pages.some((page) => page.image) &&
-        !ctx.model?.input.includes("image")
-      )
-        throw new Error(
-          "Select an image-capable model before transcribing scratchpad handwriting.",
-        );
-      activateTools("comms_save_capture");
-      pi.sendUserMessage(
-        capturePrompt(current.id, manifest, current.pages, previous),
-      );
-    } catch (error) {
-      if (job === current) job = undefined;
-      const reason = error as Error & { stderr?: string };
-      throw new Error(clean(reason.stderr || reason.message, 1200));
-    } finally {
-      if (subprocess === controller) subprocess = undefined;
     }
   }
   async function reminders(
@@ -1011,7 +677,6 @@ export default async function comms(pi: ExtensionAPI) {
       action,
       item,
       text,
-      captureAction,
     }: ActionRequest): Promise<ActionResult> => {
       if (!active) throw new Error("This Comms view has closed.");
       if (action === "refresh" || action === "cancel-triage") {
@@ -1084,92 +749,49 @@ export default async function comms(pi: ExtensionAPI) {
           .replace(/\s+/g, " ")
           .trim();
         if (!normalized) throw new Error(`Enter one action for ${list}.`);
-        let releaseRoute: (() => void) | undefined;
-        let uncertainRoute = false;
-        const recovery = `Check ${list} and inspect ${join(store().directory, "remarkable-next.lock")} before retrying.`;
-        try {
-          if (current.source === "remarkable") {
-            releaseRoute = claimCaptureRoute(store().directory, {
-              notebookId: current.sourceId,
-              action: captureAction,
-              title: normalized,
-            });
-            // Re-read after taking the shared routing lock. Another Pi session
-            // may have routed this excerpt while this editor was open.
-            const latest = currentItem(current);
-            if (
-              !captureAction ||
-              !captureActions(latest).some(
-                (action) =>
-                  action.pageId === captureAction.pageId &&
-                  action.excerpt === captureAction.excerpt,
-              )
-            )
-              throw new Error(
-                `Select an unrouted scratchpad action before adding it to ${list}.`,
-              );
-          }
-          uncertainRoute = Boolean(releaseRoute);
-          const outcome = (await reminders([normalized], list)) as {
-            mode?: string;
-            added?: string[];
-            skipped?: string[];
-          };
-          if (
-            outcome.mode !== "apply" ||
-            ![...(outcome.added || []), ...(outcome.skipped || [])].includes(
-              normalized,
-            )
+        const outcome = (await reminders([normalized], list)) as {
+          mode?: string;
+          added?: string[];
+          skipped?: string[];
+        };
+        if (
+          outcome.mode !== "apply" ||
+          ![...(outcome.added || []), ...(outcome.skipped || [])].includes(
+            normalized,
           )
-            throw new Error(
-              `Reminders returned an unrecognized result. Check ${list} before retrying.`,
-            );
-          if (nextList !== list) {
-            next = [];
-            nextLoaded = false;
-            nextList = list;
-          }
-          nextStatus = `A task was added. Ctrl+R refreshes ${list}.`;
-          try {
-            update((state) => {
-              const row = state.items.find((row) => row.key === current.key);
-              if (!row)
-                throw new Error(
-                  "The source item disappeared before routing was recorded.",
-                );
-              row.reminderAdded = normalized;
-              if (row.source === "remarkable" && captureAction)
-                routeCapture(row, captureAction, normalized);
-            });
-          } catch {
-            return snapshot(
-              `Action is in ${list}, but its local marker could not be saved. Do not add it again.${releaseRoute ? ` ${recovery}` : ""}`,
-            );
-          }
-          uncertainRoute = false;
-          return snapshot(
-            `Action is in Reminders ${list}. The review remains open.`,
+        )
+          throw new Error(
+            `Reminders returned an unrecognized result. Check ${list} before retrying.`,
           );
-        } catch (error) {
-          if (uncertainRoute)
-            throw new Error(`${errorMessage(error)} ${recovery}`);
-          throw error;
-        } finally {
-          // If the remote outcome or queue write is uncertain, retain the lock
-          // rather than permit another edited title to create a duplicate.
-          if (!uncertainRoute) releaseRoute?.();
+        if (nextList !== list) {
+          next = [];
+          nextLoaded = false;
+          nextList = list;
         }
+        nextStatus = `A task was added. Ctrl+R refreshes ${list}.`;
+        try {
+          update((state) => {
+            const row = state.items.find((row) => row.key === current.key);
+            if (!row)
+              throw new Error(
+                "The source item disappeared before routing was recorded.",
+              );
+            row.reminderAdded = normalized;
+          });
+        } catch {
+          return snapshot(
+            `Action is in ${list}, but its local marker could not be saved. Do not add it again.`,
+          );
+        }
+        return snapshot(
+          `Action is in Reminders ${list}. The review remains open.`,
+        );
       }
       update((state) => {
         const row = currentItem(current, state);
         // Status round trips must still invalidate an in-flight assessment.
         row.draftRevision++;
         delete row.resolution;
-        if (
-          row.source === "remarkable" &&
-          (action === "resolve" || action === "dismiss")
-        )
-          reviewCapture(row);
         if (action === "snooze") {
           row.snoozedUntil = snoozeUntil();
           row.status = "open";
@@ -1248,40 +870,6 @@ export default async function comms(pi: ExtensionAPI) {
         else {
           const item = currentItem(choice.item);
           if (choice.action === "draft-ai") startDraft(ctx, item);
-          else if (choice.action === "handoff") startReply(ctx, item);
-          else {
-            canStart(ctx);
-            if (choice.action === "integrate-notes") {
-              const topic = await ctx.ui.input(
-                "Which scratchpad topic or section?",
-                "For example: Customer/Chat support process",
-              );
-              if (!active) return;
-              if (topic === undefined) {
-                notice = "Notes integration cancelled. Nothing changed.";
-                continue;
-              }
-              // Re-check after the dialog. New input or another session's
-              // capture must not be overwritten by an old handoff.
-              canStart(ctx);
-              const latest = currentItem(item);
-              const request = notesRequest(latest, topic);
-              activateTools("comms_snapshot");
-              ctx.ui.setEditorText(request);
-              ctx.ui.notify(
-                "Notes integration placed in your prompt. Submit to review a structured brief and proposed file updates. Filing and reminders still require your confirmation.",
-                "info",
-              );
-              return;
-            }
-            ctx.ui.setEditorText(
-              meetingRequest(item, canonical("paste-meetings")),
-            );
-            ctx.ui.notify(
-              "Meeting integration placed in your prompt. Submit to review proposed notes and reminders. Filing still requires your confirmation.",
-              "info",
-            );
-          }
         }
         return;
       } catch (error) {
@@ -1291,7 +879,7 @@ export default async function comms(pi: ExtensionAPI) {
   }
   pi.registerCommand("comms", {
     description:
-      "Review communications: /comms [refresh [pi]|capture remarkable|cancel|next|status|demo|help]",
+      "Review communications: /comms [refresh [pi]|cancel|next|status|demo|help]",
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") {
         ctx.ui.notify("/comms needs Pi's interactive terminal UI.", "warning");
@@ -1309,7 +897,7 @@ export default async function comms(pi: ExtensionAPI) {
           return;
         queueNotice = back.notice || "";
         command = "";
-      } else if (returnToQueue || queuedReturn) revokeReply();
+      } else if (returnToQueue || queuedReturn) revokeReturn();
       if (["help", "-h", "--help"].includes(command)) {
         ctx.ui.notify(commandHelp, "info");
         return;
@@ -1319,7 +907,6 @@ export default async function comms(pi: ExtensionAPI) {
           "",
           "refresh",
           "refresh pi",
-          "capture remarkable",
           "cancel",
           "next",
           "status",
@@ -1338,10 +925,6 @@ export default async function comms(pi: ExtensionAPI) {
         if (command === "refresh") {
           const notice = startClaudeRefresh(ctx);
           if (notice) ctx.ui.notify(notice, "info");
-          return;
-        }
-        if (command === "capture remarkable") {
-          await startCapture(ctx);
           return;
         }
         if (command === "refresh pi") {

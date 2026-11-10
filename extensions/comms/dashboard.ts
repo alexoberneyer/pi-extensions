@@ -20,6 +20,7 @@ import {
 import { createVimEditor } from "../vim/index.ts";
 import {
   clean,
+  collectionSources,
   errorMessage,
   sources,
   views,
@@ -28,8 +29,6 @@ import {
   type Source,
   type State,
 } from "./state.ts";
-
-import { captureActions, type CaptureAction } from "./remarkable.ts";
 
 export type NextTask = { title: string; due: string | null };
 export type ViewState = {
@@ -40,12 +39,7 @@ export type ViewState = {
   task?: string;
 };
 export type Choice = {
-  action:
-    | "refresh"
-    | "draft-ai"
-    | "handoff"
-    | "integrate-meeting"
-    | "integrate-notes";
+  action: "refresh" | "draft-ai";
   item?: Item;
   view: ViewState;
 };
@@ -78,7 +72,6 @@ export type ActionRequest = {
   action: LocalAction;
   item?: Item;
   text?: string;
-  captureAction?: CaptureAction;
 };
 export type ActionResult = DashboardData & { notice?: string };
 type EditState = {
@@ -89,7 +82,6 @@ type EditState = {
   dispose: () => void;
   original: string;
   discard: boolean;
-  captureAction?: CaptureAction;
 };
 
 const sourceNames = {
@@ -268,7 +260,6 @@ export class Dashboard implements Component, Focusable {
     action: LocalAction,
     item?: Item,
     text?: string,
-    captureAction?: CaptureAction,
   ): Promise<void> {
     if (this.busy || this.disposed) return;
     this.busy = true;
@@ -279,7 +270,6 @@ export class Dashboard implements Component, Focusable {
         action,
         item: item ? structuredClone(item) : undefined,
         text,
-        captureAction,
       });
       if (this.disposed) return;
       this.data = result;
@@ -308,72 +298,32 @@ export class Dashboard implements Component, Focusable {
     };
   }
   private openActions(item: Item, selected = ""): void {
-    const captured = captureActions(item);
+    // Legacy meeting and scratchpad items keep generic actions only.
+    const replies = (collectionSources as readonly string[]).includes(
+      item.source,
+    );
     const requestActions = [
-      ...(item.source === "remarkable"
-        ? !this.demo
-          ? [
-              ...(item.remarkable?.pending === 0 &&
-              !item.remarkable.pages.some((page) => page.stale) &&
-              item.remarkable.pages.some((page) => page.text.trim())
-                ? [
-                    {
-                      value: "integrate-notes",
-                      label:
-                        "Integrate notes · review brief and proposed updates",
-                    },
-                  ]
-                : []),
-              ...captured.map((action, index) => ({
-                value: `capture-next-${index}`,
-                label: `Add to ${this.data.reminderList || "Next"} · p${item.remarkable!.pages.find((page) => page.id === action.pageId)!.number} · ${singleLine(action.excerpt)}`,
-              })),
-            ]
-          : []
-        : item.source === "meetings"
-          ? !this.demo && item.url
-            ? [
-                {
-                  value: "integrate-meeting",
-                  label: "Integrate meeting · review proposed updates first",
-                },
-              ]
-            : []
-          : [
-              { value: "save-draft", label: "Edit local draft" },
-              ...(!this.demo
-                ? [
-                    {
-                      value: "draft-ai",
-                      label: "Draft with AI · return to queue when ready",
-                    },
-                  ]
-                : []),
-              ...(item.draft ? [{ value: "copy", label: "Copy draft" }] : []),
-              ...(!this.demo &&
-              ["mail", "teams"].includes(item.source) &&
-              ["open", "waiting"].includes(item.status) &&
-              item.account !== "unverified" &&
-              item.draft.trim() &&
-              !item.draftStale
-                ? [
-                    {
-                      value: "handoff",
-                      label:
-                        item.source === "mail"
-                          ? "Review & create Outlook draft"
-                          : "Review & send reply",
-                    },
-                  ]
-                : []),
-            ]),
+      ...(replies
+        ? [
+            { value: "save-draft", label: "Edit local draft" },
+            ...(!this.demo
+              ? [
+                  {
+                    value: "draft-ai",
+                    label: "Draft with AI · return to queue when ready",
+                  },
+                ]
+              : []),
+            ...(item.draft ? [{ value: "copy", label: "Copy draft" }] : []),
+          ]
+        : []),
       ...(!this.demo && item.url
         ? [
             { value: "open-original", label: "Open original" },
             { value: "open-browser", label: "Open in browser" },
           ]
         : []),
-      ...(!this.demo && item.source !== "remarkable"
+      ...(!this.demo
         ? [
             {
               value: "add-next",
@@ -388,16 +338,10 @@ export class Dashboard implements Component, Focusable {
       ...(!closed
         ? [
             { value: "snooze", label: "Snooze until tomorrow at 09:00" },
-            ...(item.status !== "waiting" && item.source !== "remarkable"
+            ...(item.status !== "waiting"
               ? [{ value: "waiting", label: "Mark waiting" }]
               : []),
-            {
-              value: "resolve",
-              label:
-                item.source === "remarkable"
-                  ? "Mark reviewed"
-                  : "Resolve locally",
-            },
+            { value: "resolve", label: "Resolve locally" },
             { value: "dismiss", label: "Dismiss locally" },
           ]
         : []),
@@ -427,21 +371,9 @@ export class Dashboard implements Component, Focusable {
     );
     list.onSelect = ({ value }) => {
       this.menu = undefined;
-      if (value.startsWith("capture-next-"))
-        this.openEditor(
-          item,
-          "add-next",
-          captured[Number(value.slice("capture-next-".length))],
-        );
-      else if (value === "save-draft" || value === "add-next")
+      if (value === "save-draft" || value === "add-next")
         this.openEditor(item, value);
-      else if (
-        value === "draft-ai" ||
-        value === "handoff" ||
-        value === "integrate-meeting" ||
-        value === "integrate-notes"
-      )
-        this.finish(value, item);
+      else if (value === "draft-ai") this.finish(value, item);
       else void this.run(value as LocalAction, item);
       this.syncFocus();
     };
@@ -470,11 +402,7 @@ export class Dashboard implements Component, Focusable {
     if (edit.editor.getExpandedText() !== edit.original) edit.discard = true;
     else this.closeEditor();
   }
-  private openEditor(
-    item: Item,
-    action: EditState["action"],
-    captureAction?: CaptureAction,
-  ): void {
+  private openEditor(item: Item, action: EditState["action"]): void {
     this.closeEditor();
     const created = createVimEditor(
       this.tui,
@@ -488,10 +416,7 @@ export class Dashboard implements Component, Focusable {
     );
     const { editor } = created;
     editor.disableSubmit = true;
-    const original =
-      action === "save-draft"
-        ? item.draft
-        : captureAction?.excerpt || item.suggestion;
+    const original = action === "save-draft" ? item.draft : item.suggestion;
     editor.setText(original);
     this.editing = {
       item: structuredClone(item),
@@ -499,7 +424,6 @@ export class Dashboard implements Component, Focusable {
       ...created,
       original: editor.getExpandedText(),
       discard: false,
-      captureAction,
     };
     this.notice = created.vimEnabled
       ? ""
@@ -540,12 +464,7 @@ export class Dashboard implements Component, Focusable {
       } else if (cancel && (!edit.vimEnabled || !matchesKey(data, "escape"))) {
         this.cancelEditor();
       } else if (matchesKey(data, "ctrl+s")) {
-        void this.run(
-          edit.action,
-          edit.item,
-          edit.editor.getExpandedText(),
-          edit.captureAction,
-        );
+        void this.run(edit.action, edit.item, edit.editor.getExpandedText());
       } else {
         // A reply editor uses Enter for paragraphs, never sending or saving.
         edit.editor.handleInput(
@@ -642,11 +561,11 @@ export class Dashboard implements Component, Focusable {
 
   private coverage(): { text: string; incomplete: boolean } {
     const counts = { unchecked: 0, partial: 0, unavailable: 0 };
-    for (const source of sources) {
+    for (const source of collectionSources) {
       const entries = this.data.state.coverage.filter(
         (entry) => entry.source === source,
       );
-      if (!entries.length && source !== "remarkable") counts.unchecked++;
+      if (!entries.length) counts.unchecked++;
       for (const entry of entries)
         if (entry.status !== "complete") counts[entry.status]++;
     }
@@ -688,48 +607,20 @@ export class Dashboard implements Component, Focusable {
         : []),
       "",
       ...text(
-        item.source === "remarkable"
-          ? "Scratchpad capture · review candidates, not accepted tasks"
-          : item.source === "meetings"
-            ? "AI summary · meeting follow-up, not the original notes"
-            : "AI summary · not the original message",
+        (collectionSources as readonly string[]).includes(item.source)
+          ? "AI summary · not the original message"
+          : "Legacy capture · Comms no longer collects this source",
         muted,
       ),
       ...text(item.summary),
     ];
-    if (item.remarkable) {
-      for (const entry of item.remarkable.routed)
-        lines.push(
-          ...text(
-            `Routed to ${this.data.reminderList || "Next"}: ${entry.title}`,
-            muted,
-          ),
-        );
-      for (const page of item.remarkable.pages)
-        lines.push(
-          "",
-          ...text(
-            `Page ${page.number}${page.stale ? " · stale, recapture needed" : ""}`,
-            bold,
-          ),
-          ...text(page.text || "[Blank page]"),
-        );
-    }
     if (item.uncertainty?.trim())
       lines.push(
         "",
         th.fg("warning", "Not verified"),
         ...text(item.uncertainty),
       );
-    if (item.source === "meetings")
-      lines.push(
-        "",
-        ...text(
-          "Integration requires confirmation. This queue does not track filed notes. Resolve after review.",
-          muted,
-        ),
-      );
-    else if (item.draft.trim())
+    if (item.draft.trim())
       lines.push(
         "",
         ...text("Local reply draft · not sent", muted),
@@ -765,12 +656,6 @@ export class Dashboard implements Component, Focusable {
           ? text(`Snoozed until: ${item.snoozedUntil}`, muted)
           : []),
         ...(item.url ? text(`Original: ${item.url}`, muted) : []),
-        ...(item.remarkable
-          ? text(
-              `Notebook: ${item.sourceId}\nDesktop copy newest change: ${item.remarkable.newestChangeAt}`,
-              muted,
-            )
-          : []),
       );
     return lines;
   }
@@ -778,17 +663,11 @@ export class Dashboard implements Component, Focusable {
     return [
       "Saved source checks · not a live inbox guarantee",
       "",
-      ...sources.flatMap((source) => {
+      ...collectionSources.flatMap((source) => {
         const entries = this.data.state.coverage.filter(
           (entry) => entry.source === source,
         );
-        if (!entries.length)
-          return [
-            source === "remarkable"
-              ? "reMarkable · optional, not captured. Use /comms capture remarkable."
-              : `${sourceNames[source]} · unchecked`,
-            "",
-          ];
+        if (!entries.length) return [`${sourceNames[source]} · unchecked`, ""];
         return entries.flatMap((entry) => [
           `${sourceNames[source]} · ${entry.account} · ${entry.status}`,
           `Checked: ${entry.checkedAt}`,

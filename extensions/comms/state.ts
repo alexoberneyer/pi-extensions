@@ -1,16 +1,14 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { meetingPageId, meetingUrl } from "./meetings.ts";
-import { validateCaptureRecord, type CaptureRecord } from "./remarkable.ts";
-
 export const collectionSources = [
   "mail",
   "teams",
   "calendar",
   "notion",
-  "meetings",
 ] as const;
-export const sources = [...collectionSources, "remarkable"] as const;
+// Comms no longer collects these. Saved items keep loading and stay actionable.
+export const legacySources = ["meetings", "remarkable"] as const;
+export const sources = [...collectionSources, ...legacySources] as const;
 export type CollectionSource = (typeof collectionSources)[number];
 export type Source = (typeof sources)[number];
 export type Status = "open" | "waiting" | "resolved" | "dismissed";
@@ -44,7 +42,8 @@ export type Item = Omit<Candidate, "proposedReply"> & {
   draftStale: boolean;
   reminderAdded?: string;
   resolution?: Resolution;
-  remarkable?: CaptureRecord;
+  // Legacy scratchpad evidence, kept unchanged on old reMarkable items.
+  remarkable?: Record<string, unknown>;
 };
 export type Coverage = {
   source: Source;
@@ -134,16 +133,8 @@ export function validateCandidate(
       !/^https:\/\//i.test(value.url))
   )
     throw new Error("Source links must use HTTPS.");
-  if (source === "meetings") {
-    if (!value.url)
-      throw new Error("A meeting needs its original Notion page link.");
-    meetingUrl(value.url, value.sourceId);
-  }
   return {
-    sourceId:
-      source === "meetings"
-        ? meetingPageId(value.sourceId)
-        : clean(value.sourceId, 2000),
+    sourceId: clean(value.sourceId, 2000),
     sourceUpdatedAt: new Date(value.sourceUpdatedAt).toISOString(),
     title: clean(value.title, 240),
     person: clean(value.person, 240),
@@ -173,7 +164,7 @@ export function validateCandidates(
   }
   return [...byId.values()];
 }
-function validateResolution(value: Resolution, source: Source): Resolution {
+function validateResolution(value: Resolution): Resolution {
   if (!value || typeof value !== "object")
     throw new Error("Invalid request resolution.");
   for (const [field, max] of [
@@ -193,10 +184,7 @@ function validateResolution(value: Resolution, source: Source): Resolution {
       "A resolution needs valid request and evidence timestamps.",
     );
   return {
-    sourceId:
-      source === "meetings"
-        ? meetingPageId(value.sourceId)
-        : clean(value.sourceId, 2000),
+    sourceId: clean(value.sourceId, 2000),
     sourceUpdatedAt: new Date(value.sourceUpdatedAt).toISOString(),
     evidenceId: clean(value.evidenceId, 2000).trim(),
     evidenceAt: new Date(value.evidenceAt).toISOString(),
@@ -215,14 +203,16 @@ export function validateResolutions(
     throw new Error("Invalid request resolutions.");
   if (
     resolutions.length &&
-    (!previous || account === "unverified" || source === "remarkable")
+    (!previous ||
+      account === "unverified" ||
+      !(collectionSources as readonly string[]).includes(source))
   )
     throw new Error(
       "Resolutions require a verified account and run-start queue snapshot.",
     );
   const byId = new Map<string, Resolution>();
   for (const raw of resolutions) {
-    const resolution = validateResolution(raw, source);
+    const resolution = validateResolution(raw);
     const target = previous!.items.find(
       (item) => item.key === identity(source, account, resolution.sourceId),
     );
@@ -280,7 +270,7 @@ export function validateState(value: State): State {
     )
       throw new Error("Invalid Comms item. The existing file was left intact.");
     if (item.resolution !== undefined) {
-      const resolution = validateResolution(item.resolution, item.source);
+      const resolution = validateResolution(item.resolution);
       if (
         item.source === "remarkable" ||
         resolution.sourceId !== item.sourceId ||
@@ -296,7 +286,13 @@ export function validateState(value: State): State {
         !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(item.sourceId)
       )
         throw new Error("Invalid scratchpad review item.");
-      validateCaptureRecord(item.remarkable);
+      if (
+        item.remarkable !== undefined &&
+        (!item.remarkable ||
+          typeof item.remarkable !== "object" ||
+          Array.isArray(item.remarkable))
+      )
+        throw new Error("Invalid scratchpad review item.");
     } else if (item.remarkable !== undefined)
       throw new Error("Scratchpad evidence belongs only to reMarkable items.");
     keys.add(item.key);
@@ -327,7 +323,7 @@ export function ingest(
   snapshot?: State,
 ): void {
   if (
-    !sources.includes(source) ||
+    !(collectionSources as readonly string[]).includes(source) ||
     !account.trim() ||
     account.length > 300 ||
     !validDate(startedAt) ||
@@ -576,26 +572,6 @@ export function demoState(now = new Date().toISOString()): State {
     ],
     "complete",
     "Demo data only",
-    now,
-  );
-  ingest(
-    state,
-    "meetings",
-    "demo@example.invalid",
-    [
-      {
-        sourceId: "11111111222233334444555555555555",
-        sourceUpdatedAt: now,
-        title: "Project sync follow-up",
-        person: "Example colleague",
-        summary: "You agreed to review the proposal. No deadline was recorded.",
-        suggestion: "Review the proposal from the project sync.",
-        priority: 2,
-        url: "https://www.notion.so/Project-sync-11111111222233334444555555555555",
-      },
-    ],
-    "complete",
-    "Demo meeting summary only",
     now,
   );
   state.items[0].draft =

@@ -22,7 +22,6 @@ export const readTools = [
   ...[
     "notion-get-self",
     "notion-get-tool-access",
-    "notion-query-meeting-notes",
     "notion-get-users",
     "notion-search",
     "notion-fetch",

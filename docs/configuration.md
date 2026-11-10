@@ -16,11 +16,11 @@ Only `~/.config/pi-extensions/config.json` is discovered automatically. Keep it 
 
 Identity names are hints. Collectors must verify the connected account before assigning ownership. Calendar windows and tomorrow's snooze use the configured timezone. The default is UTC, not a guess about your location.
 
-Comms includes neutral triage, message and meeting instructions. Override them with `comms.triageInstructions`, `messageInstructions` and `meetingInstructions`, each pointing to a private Markdown file. A configured notes checkout can also supply legacy `.claude/commands/triage.md`, `.claude/commands/message.md` and `.claude/skills/paste-meetings/SKILL.md`. Explicit instruction paths take precedence.
+Comms includes neutral triage and message instructions. Override them with `comms.triageInstructions` and `messageInstructions`, each pointing to a private Markdown file. A configured notes checkout can also supply legacy `.claude/commands/triage.md` and `.claude/commands/message.md`. Explicit instruction paths take precedence.
 
-`notesDirectory` is required for filing notes, not for demo or ordinary collection. `PI_COMMS_NOTES_DIR` remains an explicit compatibility override. Missing optional meeting instructions do not prevent other sources collecting. Missing required, explicitly configured instructions are reported.
+`notesDirectory` sets the Claude collector's working directory and the legacy instruction lookup. It is not required for demo or ordinary collection. `PI_COMMS_NOTES_DIR` remains an explicit compatibility override. Missing required, explicitly configured instructions are reported.
 
-For reMarkable, set `comms.remarkableSource` to its desktop-copy directory and optionally `notebookName`. The first capture pins a stable notebook ID in private state. No source notebooks are modified. The macOS desktop path remains a platform default, not a portable promise for Linux or Windows.
+`meetingInstructions`, `remarkableSource` and `notebookName` are still accepted so older configuration files load. Comms no longer collects meetings or captures reMarkable notebooks.
 
 Opening `/comms` or selecting a collection/drafting action activates the corresponding queue access. `/comms demo` uses disposable data and does not authorize access to the real queue. Activated snapshot access can place retained private material into model context until the session is replaced or reloaded. See the Comms privacy section before enabling it.
 

@@ -92,6 +92,6 @@ Skill/resource paths are references, not copied skill bundles. Missing paths are
 
 ## Reload behavior
 
-Factory settings, including Fast defaults, approval policy and workstation paths, refresh on `/reload`. Comms and remote helpers also validate configuration when invoked. An open Comms view pins its Reminders destination. Reopen the view to select a newly configured list. Cached rows from another list are hidden rather than relabeled. There are no configuration watchers or per-token configuration reads.
+Factory settings, including Fast defaults, approval policy and workstation paths, refresh on `/reload`. Comms and remote helpers also validate configuration when invoked. An open Comms view pins its Reminders destination. Reopen the view to select a newly configured list. There are no configuration watchers or per-token configuration reads.
 
 Malformed configuration never silently reverts to weaker approval policy. Repair the private file and reload. Do not work around a broken guard by disabling it.

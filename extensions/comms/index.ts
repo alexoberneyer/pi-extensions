@@ -19,19 +19,22 @@ import {
   type ActionRequest,
   type ActionResult,
   type Choice,
-  type NextTask,
   type ViewState,
 } from "./dashboard.ts";
 import {
   clean,
   decide,
   demoState,
+  disposition,
   errorMessage,
   ingest,
   setDraft,
   collectionSources,
   legacySources,
+  undo,
   validateCandidates,
+  waitingDays,
+  type Undo,
   type Resolution,
   type Candidate,
   type Coverage,
@@ -63,7 +66,6 @@ const commandHelp = `Comms commands:
 /comms refresh: collect through Claude
 /comms refresh pi: collect in this Pi conversation
 /comms cancel: stop this session's Claude collector
-/comms next: read the configured Reminders list
 /comms status: show coverage and failures
 /comms demo: open disposable demo data
 /comms help: show this help`;
@@ -108,12 +110,9 @@ export default async function comms(pi: ExtensionAPI) {
   let closeView: (() => void) | undefined;
   let subprocess: AbortController | undefined;
   let planning = false;
-  let next: NextTask[] = [];
-  let nextList: string | undefined;
-  let nextLoaded = false;
   let savedView: ViewState = { view: 0, search: "" };
-  const nextNotLoaded = "Not loaded. Ctrl+R reads Reminders on this Mac.";
-  let nextStatus = nextNotLoaded;
+  // Decisions made in this Pi session, newest last. u undoes them in turn.
+  let undos: Undo[] = [];
   const store = () => new Store(join(getAgentDir(), "comms"));
   let returnToQueue:
     | {
@@ -198,6 +197,7 @@ export default async function comms(pi: ExtensionAPI) {
   });
   pi.on("session_start", () => {
     active = true;
+    undos = [];
     deactivateTools();
   });
   pi.on("session_shutdown", async () => {
@@ -573,10 +573,7 @@ export default async function comms(pi: ExtensionAPI) {
       throw error;
     }
   }
-  async function reminders(
-    titles: string[] = [],
-    list = readConfig().comms.reminderList,
-  ): Promise<unknown> {
+  async function reminders(titles: string[], list: string): Promise<unknown> {
     if (process.platform !== "darwin")
       throw new Error(
         "Reminders requires your Mac. No remote fallback is configured.",
@@ -601,50 +598,16 @@ export default async function comms(pi: ExtensionAPI) {
       if (subprocess === controller) subprocess = undefined;
     }
   }
-  async function refreshNext(config = readConfig()): Promise<void> {
-    const list = config.comms.reminderList;
-    const timeZone = config.identity.timeZone;
-    if (nextList !== list) {
-      next = [];
-      nextLoaded = false;
-      nextList = list;
-    }
-    try {
-      const rows = await reminders([], list);
-      if (
-        !Array.isArray(rows) ||
-        rows.some(
-          (row) =>
-            typeof row?.title !== "string" ||
-            (row.due !== null && typeof row.due !== "string"),
-        )
-      )
-        throw new Error("Unexpected Reminders response.");
-      next = rows.map((row) => ({
-        title: clean(row.title, 500),
-        due: row.due,
-      }));
-      nextLoaded = true;
-      nextStatus = `Read ${new Date().toLocaleString("en", { timeZone })} · Reminders ${list}`;
-    } catch (error) {
-      nextStatus = `Unavailable: ${errorMessage(error, 250)}. Cached tasks may be stale.`;
-      throw error;
-    }
-  }
   async function browse(
     ctx: ExtensionCommandContext,
     demo: boolean,
-    initialView = 0,
   ): Promise<void> {
     const config = demo ? undefined : readConfig();
     const list = config?.comms.reminderList ?? "Next";
-    if (!demo && initialView === 2) {
-      ctx.ui.notify(`Reading Reminders ${list}…`, "info");
-      await refreshNext(config);
-    }
     let memory = demoState();
-    let view: ViewState =
-      demo || initialView === 2 ? { view: initialView, search: "" } : savedView;
+    // Demo decisions never mix with the real undo history.
+    const history: Undo[] = demo ? [] : undos;
+    let view: ViewState = demo ? { view: 0, search: "" } : savedView;
     let notice = demo ? "" : queueNotice;
     if (!demo) queueNotice = "";
     const read = () => (demo ? structuredClone(memory) : store().read());
@@ -652,24 +615,27 @@ export default async function comms(pi: ExtensionAPI) {
       if (demo) change(memory);
       else store().update(change);
     };
-    const snapshot = (message = ""): ActionResult => ({
+    const snapshot = (message = "", select?: string): ActionResult => ({
       state: read(),
       reminderList: list,
-      next: demo
-        ? [{ title: "Example task in Next", due: null }]
-        : nextList === list
-          ? next
-          : [],
-      nextStatus: demo
-        ? "Demo tasks only"
-        : nextList === list
-          ? nextStatus
-          : nextNotLoaded,
-      nextLoaded: demo || (nextList === list && nextLoaded),
       triageStatus: demo ? undefined : triageStatus,
       triageRunning: !demo && Boolean(external),
+      canUndo: history.length > 0,
       notice: message,
+      select,
     });
+    // Applies a decision and returns what u needs to restore the disposition
+    // it replaced. Callers record it only after the store write succeeded.
+    const decided = (row: Item, change: () => void): Undo => {
+      const before = disposition(row);
+      change();
+      return {
+        key: row.key,
+        before,
+        after: disposition(row),
+        revision: row.draftRevision,
+      };
+    };
     const currentItem = (item?: Item, state = read()): Item => {
       const current = state.items.find((row) => row.key === item?.key);
       if (
@@ -704,15 +670,24 @@ export default async function comms(pi: ExtensionAPI) {
         memory = demoState();
         return snapshot("Demo reset. No external actions.");
       }
-      if (action === "next") {
-        if (!demo) {
-          try {
-            await refreshNext(config);
-          } catch (error) {
-            return snapshot(errorMessage(error));
-          }
-        }
-        return snapshot();
+      if (action === "undo") {
+        if (planning)
+          throw new Error("Leave /plan mode before changing Comms items.");
+        const entry = history.pop();
+        if (!entry) throw new Error("Nothing to undo in this session.");
+        let restored: Item | undefined;
+        update((state) => {
+          const row = state.items.find((row) => row.key === entry.key);
+          if (row && undo(row, entry)) restored = structuredClone(row);
+        });
+        if (!restored)
+          return snapshot("That request changed since. Nothing undone.");
+        return snapshot(
+          entry.after.decision === "next"
+            ? `Undone. The reminder stays in ${list}.`
+            : `Undone. ${restored.title} is back.`,
+          restored.key,
+        );
       }
       const current = currentItem(item);
       if (action === "copy") {
@@ -773,22 +748,17 @@ export default async function comms(pi: ExtensionAPI) {
           throw new Error(
             `Reminders returned an unrecognized result. Check ${list} before retrying.`,
           );
-        if (nextList !== list) {
-          next = [];
-          nextLoaded = false;
-          nextList = list;
-        }
-        nextStatus = `A task was added. Ctrl+R refreshes ${list}.`;
         // Legacy meeting and scratchpad reviews can hold several actions.
         // Routing one of them never closes the review.
         const closable =
           (collectionSources as readonly string[]).includes(current.source) &&
           ["open", "waiting"].includes(current.status);
         let outcomeNotice = closable
-          ? `Added to ${list}. Item closed.`
+          ? `Added to ${list}. Item closed. u undoes.`
           : current.status === "resolved" || current.status === "dismissed"
             ? `Action is in Reminders ${list}.`
             : `Action is in Reminders ${list}. The review remains open.`;
+        let entry: Undo | undefined;
         try {
           update((state) => {
             const row = state.items.find((row) => row.key === current.key);
@@ -800,7 +770,8 @@ export default async function comms(pi: ExtensionAPI) {
             // another session may have changed it while Reminders ran.
             const unchanged = isDeepStrictEqual(row, current);
             row.reminderAdded = normalized;
-            if (closable && unchanged) decide(row, "next");
+            if (closable && unchanged)
+              entry = decided(row, () => decide(row, "next"));
             else if (closable)
               outcomeNotice = `Action is in ${list}. Item changed and remains open. Review it again.`;
           });
@@ -809,24 +780,30 @@ export default async function comms(pi: ExtensionAPI) {
             `Action is in ${list}, but its local marker could not be saved. Do not add it again.`,
           );
         }
+        if (entry) history.push(entry);
         return snapshot(outcomeNotice);
       }
+      const now = new Date();
+      const outcomes = {
+        dismiss: "Dropped locally. Nothing changed at the source.",
+        resolve: "Resolved locally. Nothing sent.",
+        snooze: "Snoozed until tomorrow at 09:00.",
+        waiting: `Waiting. Back in ${waitingDays} days at 09:00.`,
+      };
+      if (!(action in outcomes))
+        throw new Error(`Unsupported Comms action: ${action}.`);
+      let entry: Undo | undefined;
       update((state) => {
         const row = currentItem(current, state);
-        if (action === "snooze")
-          decide(row, "snooze", new Date(), snoozeUntil());
-        else if (action === "dismiss") decide(row, "drop");
-        else if (
-          action === "waiting" ||
-          action === "resolve" ||
-          action === "reopen"
-        )
-          decide(row, action);
-        else throw new Error(`Unsupported Comms action: ${action}.`);
+        entry = decided(row, () => {
+          if (action === "snooze") decide(row, "snooze", now, snoozeUntil(now));
+          else if (action === "waiting")
+            decide(row, "waiting", now, snoozeUntil(now, waitingDays));
+          else decide(row, action === "dismiss" ? "drop" : "resolve", now);
+        });
       });
-      return snapshot(
-        "Local status updated. Nothing sent or deleted at the source.",
-      );
+      if (entry) history.push(entry);
+      return snapshot(`${outcomes[action as keyof typeof outcomes]} u undoes.`);
     };
     while (active) {
       let dashboard: Dashboard | undefined;
@@ -896,7 +873,7 @@ export default async function comms(pi: ExtensionAPI) {
   }
   pi.registerCommand("comms", {
     description:
-      "Review communications: /comms [refresh [pi]|cancel|next|status|demo|help]",
+      "Review communications: /comms [refresh [pi]|cancel|status|demo|help]",
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") {
         ctx.ui.notify("/comms needs Pi's interactive terminal UI.", "warning");
@@ -920,15 +897,9 @@ export default async function comms(pi: ExtensionAPI) {
         return;
       }
       if (
-        ![
-          "",
-          "refresh",
-          "refresh pi",
-          "cancel",
-          "next",
-          "status",
-          "demo",
-        ].includes(command)
+        !["", "refresh", "refresh pi", "cancel", "status", "demo"].includes(
+          command,
+        )
       ) {
         ctx.ui.notify(
           `Unknown Comms arguments: ${clean(command, 120)}\n${commandHelp}`,
@@ -959,7 +930,7 @@ export default async function comms(pi: ExtensionAPI) {
           activateTools("comms_snapshot");
           const state = store().read();
           ctx.ui.notify(
-            `Queue: ${state.items.length} retained items\n${store().file}\nNotes: ${notesDirectory(false) || "not configured"}\nTriage: ${runningJob() || triageStatus || "Claude triage has not run in this Pi session."}\n${state.coverage.map((source) => `${source.source} · ${source.account} · ${source.status} · ${source.checkedAt}\n${source.detail}`).join("\n") || "No sources checked. Run /comms refresh using Claude's existing connections."}\n${nextStatus}`,
+            `Queue: ${state.items.length} retained items\n${store().file}\nNotes: ${notesDirectory(false) || "not configured"}\nTriage: ${runningJob() || triageStatus || "Claude triage has not run in this Pi session."}\n${state.coverage.map((source) => `${source.source} · ${source.account} · ${source.status} · ${source.checkedAt}\n${source.detail}`).join("\n") || "No sources checked. Run /comms refresh using Claude's existing connections."}`,
             "info",
           );
           return;
@@ -967,8 +938,7 @@ export default async function comms(pi: ExtensionAPI) {
         if (command !== "demo") activateTools("comms_snapshot");
         browsing = true;
         try {
-          if (active)
-            await browse(ctx, command === "demo", command === "next" ? 2 : 0);
+          if (active) await browse(ctx, command === "demo");
         } finally {
           browsing = false;
           closeView = undefined;

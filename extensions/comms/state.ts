@@ -56,6 +56,7 @@ export type Item = Omit<Candidate, "proposedReply"> & {
   source: Source;
   account: string;
   status: Status;
+  // Hides an open or waiting item until then.
   snoozedUntil?: string;
   draft: string;
   draftRevision: number;
@@ -566,27 +567,22 @@ export function setDraft(
   item.draftRevision++;
   item.draftStale = false;
 }
-export const views = ["Needs you", "Drafts", "Next", "Waiting", "All"] as const;
+// Top shows the first few of Needs you. Deciding one reveals the next. Closed
+// items have no view: new activity reopens them and deferrals return by date.
+export const views = ["Top", "Needs you"] as const;
 export function visibleItems(
   state: State,
-  view: string,
   query = "",
   now = Date.now(),
 ): Item[] {
   return state.items
-    .filter((item) => {
-      if (view === "Needs you" && !eligible(item, now)) return false;
-      if (
-        view === "Drafts" &&
-        (!item.draft || ["resolved", "dismissed"].includes(item.status))
-      )
-        return false;
-      if (view === "Waiting" && item.status !== "waiting") return false;
-      if (view === "Next") return false;
-      return `${item.title}\n${item.person}\n${item.summary}\n${item.uncertainty || ""}\n${item.blocker || ""}\n${item.source}\n${item.account}`
-        .toLowerCase()
-        .includes(query.toLowerCase());
-    })
+    .filter(
+      (item) =>
+        eligible(item, now) &&
+        `${item.title}\n${item.person}\n${item.summary}\n${item.uncertainty || ""}\n${item.blocker || ""}\n${item.source}\n${item.account}`
+          .toLowerCase()
+          .includes(query.toLowerCase()),
+    )
     .sort(
       (a, b) =>
         a.priority - b.priority ||
@@ -600,47 +596,37 @@ export function activeSince(item: Item): number {
     item.reopenedAt ?? item.firstSeenAt ?? item.sourceUpdatedAt,
   );
 }
+// A waiting item returns when its follow-up date passes, so nothing deferred
+// stays hidden without a way back.
 export function eligible(item: Item, now = Date.now()): boolean {
   return (
-    item.status === "open" &&
+    (item.status === "open" || item.status === "waiting") &&
     !(item.snoozedUntil && Date.parse(item.snoozedUntil) > now)
   );
 }
 export const needsYouCap = 5;
-export function backlog(items: Item[], now = Date.now()) {
-  const open = items.filter((item) => eligible(item, now));
-  return {
-    eligible: open.length,
-    unresolved: items.filter((item) =>
-      ["open", "waiting"].includes(item.status),
-    ).length,
-    oldestDays: open.length
-      ? Math.max(
-          0,
-          Math.floor((now - Math.min(...open.map(activeSince))) / 86400000),
-        )
-      : 0,
-  };
+// A waiting item asks again after this many days.
+export const waitingDays = 3;
+export function oldestDays(items: Item[], now = Date.now()): number {
+  return items.length
+    ? Math.max(
+        0,
+        Math.floor((now - Math.min(...items.map(activeSince))) / 86400000),
+      )
+    : 0;
 }
-// One local disposition. Status and decision always change together.
+// One local disposition. Status and decision always change together. Snooze
+// and waiting hide the item until a date.
 export function decide(
   item: Item,
-  action: "next" | "drop" | "resolve" | "waiting" | "snooze" | "reopen",
+  action: "next" | "drop" | "resolve" | "waiting" | "snooze",
   now = new Date(),
-  snoozedUntil?: string,
+  until?: string,
 ): void {
   // Status round trips must still invalidate an in-flight assessment.
   item.draftRevision++;
   delete item.resolution;
   delete item.snoozedUntil;
-  if (action === "reopen") {
-    if (item.status === "resolved" || item.status === "dismissed")
-      item.reopenedAt = now.toISOString();
-    item.status = "open";
-    delete item.decision;
-    delete item.decidedAt;
-    return;
-  }
   item.status =
     action === "drop"
       ? "dismissed"
@@ -649,12 +635,64 @@ export function decide(
         : action === "snooze"
           ? "open"
           : "resolved";
-  if (action === "snooze") {
-    if (!snoozedUntil) throw new Error("A snooze needs its end time.");
-    item.snoozedUntil = snoozedUntil;
+  if (action === "snooze" || action === "waiting") {
+    if (!until) throw new Error(`A ${action} decision needs its end time.`);
+    item.snoozedUntil = until;
   }
   item.decision = action;
   item.decidedAt = now.toISOString();
+}
+export type Disposition = Pick<
+  Item,
+  | "status"
+  | "decision"
+  | "decidedAt"
+  | "snoozedUntil"
+  | "resolution"
+  | "reopenedAt"
+>;
+// Every field a decision changes, always with the same keys.
+export function disposition(item: Item): Disposition {
+  const { status, decision, decidedAt, snoozedUntil, resolution, reopenedAt } =
+    item;
+  return structuredClone({
+    status,
+    decision,
+    decidedAt,
+    snoozedUntil,
+    resolution,
+    reopenedAt,
+  });
+}
+export type Undo = {
+  key: string;
+  before: Disposition;
+  after: Disposition;
+  revision: number;
+};
+// Restores the disposition before a decision, only while nothing else changed
+// the item since. A refresh or another session wins over a stale undo.
+export function undo(item: Item, entry: Undo): boolean {
+  if (
+    item.draftRevision !== entry.revision ||
+    !isDeepStrictEqual(disposition(item), entry.after)
+  )
+    return false;
+  delete item.decision;
+  delete item.decidedAt;
+  delete item.snoozedUntil;
+  delete item.resolution;
+  delete item.reopenedAt;
+  Object.assign(
+    item,
+    Object.fromEntries(
+      Object.entries(structuredClone(entry.before)).filter(
+        ([, value]) => value !== undefined,
+      ),
+    ),
+  );
+  item.draftRevision++;
+  return true;
 }
 export function demoState(now = new Date().toISOString()): State {
   const state = emptyState();

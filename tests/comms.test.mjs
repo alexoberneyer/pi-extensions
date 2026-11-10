@@ -58,6 +58,8 @@ const {
   identity,
   validateState,
   decide,
+  disposition,
+  undo,
   activeSince,
 } = await jiti.import(join(source, "state.ts"));
 const { Store } = await jiti.import(join(source, "store.ts"));
@@ -121,7 +123,7 @@ test("retains every request, deduplicates by account and ID, and preserves unres
     "all pages",
     first,
   );
-  assert.equal(visibleItems(state, "Needs you").length, 7);
+  assert.equal(visibleItems(state).length, 7);
   ingest(
     state,
     "mail",
@@ -170,7 +172,7 @@ test("optional uncertainty stays private, searchable and sanitized without chang
   const state = store.read();
   assert.equal(state.version, 1);
   assert.equal(state.items[0].uncertainty, "Reply not verified.");
-  assert.equal(visibleItems(state, "Needs you", "not verified").length, 1);
+  assert.equal(visibleItems(state, "not verified").length, 1);
   assert.equal(state.items[0].summary, candidate().summary);
   for (const uncertainty of [null, false, [], {}, "x".repeat(2001)])
     assert.throws(
@@ -239,21 +241,20 @@ test("unchanged requests stay dismissed; newer evidence reopens and invalidates 
   assert.equal(item.draftStale, false);
 });
 
-test("snoozed, waiting and resolved items remain inspectable without cluttering Needs you", () => {
+test("snoozed and waiting items return by date, and closed items stay out of every tab", () => {
   const state = demoState(first);
   state.items[0].snoozedUntil = second;
   state.items[1].status = "waiting";
+  state.items[1].snoozedUntil = second;
   state.items[2].status = "resolved";
-  assert.equal(
-    visibleItems(state, "Needs you", "", Date.parse(first)).length,
-    0,
+  assert.equal(visibleItems(state, "", Date.parse(first)).length, 0);
+  assert.deepEqual(
+    visibleItems(state, "", Date.parse(second)).map((item) => item.key),
+    [state.items[0].key, state.items[1].key],
   );
-  assert.equal(
-    visibleItems(state, "Needs you", "", Date.parse(second)).length,
-    1,
-  );
-  assert.equal(visibleItems(state, "Waiting").length, 1);
-  assert.equal(visibleItems(state, "All").length, 3);
+  // A wait saved before follow-up dates existed is due at once.
+  delete state.items[1].snoozedUntil;
+  assert.equal(visibleItems(state, "", Date.parse(first)).length, 1);
 });
 
 test("atomic private storage merges independent writers and preserves the file on invalid updates", (t) => {
@@ -381,9 +382,6 @@ function dashboard(state = demoState(first), height = 30, options = {}) {
   if (options.inputHook === false) delete tui.inputListeners;
   const data = {
     state,
-    next: [],
-    nextStatus: "Not loaded",
-    nextLoaded: false,
     ...options.data,
   };
   const requests = [];
@@ -696,65 +694,65 @@ test("request actions are centered over dimmed details and Escape restores the e
   }
 });
 
-test("popup status actions match the request state and retain a path back to Needs you", () => {
-  for (const status of [
-    "open",
-    "waiting",
-    "resolved",
-    "dismissed",
-    "snoozed",
-  ]) {
+test("popup actions defer by date, ask again for a returned wait and never offer reopening", () => {
+  for (const status of ["open", "waiting"]) {
     const state = demoState(first);
-    const item = state.items[0];
-    item.status = status === "snoozed" ? "open" : status;
-    if (status === "snoozed")
-      item.snoozedUntil = new Date(Date.now() + 86400000).toISOString();
+    state.items[0].status = status;
     const h = dashboard(state, 30, {
-      initial: { view: 4, search: "rollout" },
+      initial: { view: 1, search: "rollout" },
     });
     key(h.view, "\r", "\r");
     const { text } = popup(h.view);
-    if (status === "resolved" || status === "dismissed") {
-      assert.match(text, /Reopen locally/);
-      assert.doesNotMatch(
-        text,
-        /Snooze|Mark waiting|Resolve locally|Dismiss locally/,
-      );
-    } else {
-      assert.doesNotMatch(text, /Reopen locally/);
-      assert.match(text, /Resolve locally/);
-      if (status === "waiting" || status === "snoozed")
-        assert.match(text, /Return to Needs you/);
-      else assert.doesNotMatch(text, /Return to Needs you/);
-      if (status === "waiting") assert.doesNotMatch(text, /Mark waiting/);
-    }
+    assert.match(text, /Snooze until tomorrow at 09:00/);
+    assert.match(
+      text,
+      status === "waiting"
+        ? /Still waiting · back in 3 days/
+        : /Waiting for a reply · back in 3 days/,
+    );
+    assert.match(text, /Resolve locally/);
+    assert.match(text, /Dismiss locally/);
+    assert.doesNotMatch(text, /Reopen|Return to Needs you/);
   }
 });
 
-test("popup actions return their result to the dashboard without losing the selected request", async () => {
+test("popup actions return their result to the dashboard, and u undoes them in place", async () => {
   const state = demoState(first);
   const h = dashboard(state, 30, {
-    initial: { view: 4, search: "rollout", source: "teams" },
+    initial: { view: 1, search: "rollout", source: "teams" },
     perform: async ({ action, item }) => {
-      const current = state.items.find((row) => row.key === item.key);
-      current.status = action === "resolve" ? "resolved" : "open";
-      return { ...h.data, state, notice: "Local status updated." };
+      if (action === "undo") {
+        state.items[0].status = "open";
+        return {
+          ...h.data,
+          state,
+          notice: "Undone.",
+          select: state.items[0].key,
+        };
+      }
+      state.items.find((row) => row.key === item.key).status = "resolved";
+      return {
+        ...h.data,
+        state,
+        canUndo: true,
+        notice: "Resolved locally. u undoes.",
+      };
     },
   });
   const before = h.view.viewState();
+  assert.doesNotMatch(screen(h.view), /u Undo/);
   key(h.view, "\r", "\r");
   selectAction(h.view, "Resolve locally");
   await settled();
   assert.equal(h.requests[0].action, "resolve");
   assert.equal(h.requests[0].item.key, before.selected);
-  assert.match(screen(h.view), /Request details/);
-  assert.match(screen(h.view), /Local status updated/);
-  assert.doesNotMatch(screen(h.view), /Request actions/);
-  assert.deepEqual(h.view.viewState(), before);
-  key(h.view, "\r");
-  selectAction(h.view, "Reopen locally");
+  // The closed request leaves the screen instead of showing another one.
+  assert.doesNotMatch(screen(h.view), /Request details|Request actions/);
+  assert.match(screen(h.view), /Resolved locally\. u undoes\./);
+  assert.match(screen(h.view), /u Undo/);
+  key(h.view, "u");
   await settled();
-  assert.equal(h.requests[1].action, "reopen");
+  assert.equal(h.requests[1].action, "undo");
   assert.equal(state.items[0].status, "open");
   assert.deepEqual(h.view.viewState(), before);
   assert.equal(h.choice(), undefined);
@@ -798,17 +796,18 @@ test("the table uses available height, highlights selection and keeps the whole 
     "ok",
     first,
   );
-  const h = dashboard(state, 30, { initial: { view: 4, search: "" } });
+  const h = dashboard(state, 30, { initial: { view: 1, search: "" } });
   let text = screen(h.view);
-  assert.equal((text.match(/Request \d/g) || []).length, 18);
+  // The idle search line is hidden, so the table gains its row.
+  assert.equal((text.match(/Request \d/g) || []).length, 19);
   assert.match(text, /P\s+Source\s+Person\s+Request\s+Local status\s+Updated/);
   assert.match(text, /Needs you 40/);
   key(h.view, "\x1b[6~"); // PageDown uses the visible table height.
-  assert.match(screen(h.view), /19\/40 shown/);
+  assert.match(screen(h.view), /20\/40 shown/);
   for (let i = 0; i < 40; i++) key(h.view, "\x1b[B");
   assert.match(screen(h.view), /40\/40 shown/);
   h.terminal.rows = 45;
-  assert.equal((screen(h.view).match(/Request \d/g) || []).length, 33);
+  assert.equal((screen(h.view).match(/Request \d/g) || []).length, 34);
   assert.ok(
     h.view
       .render(120)
@@ -816,64 +815,26 @@ test("the table uses available height, highlights selection and keeps the whole 
   );
 });
 
-test("Next cursor keys preserve task selection and distinguish unloaded, empty and filtered states", () => {
-  const h = dashboard(demoState(first), 30, {
-    data: {
-      next: [
-        { title: "First task", due: null },
-        { title: "Second task", due: "tomorrow" },
-      ],
-      nextLoaded: true,
-    },
-    initial: { view: 2, search: "" },
-  });
-  screen(h.view);
-  key(h.view, "\x1b[B", "\x1b[D");
-  assert.match(screen(h.view), /› Second task/);
-  key(h.view, "/", "z");
-  assert.match(screen(h.view), /No matches/);
-  key(h.view, "\x1b", "\x1b"); // Leave search, then clear the filter.
+test("the search box renders only while typing, and a kept filter stays visible", () => {
+  const h = dashboard();
+  // Pi's Input draws a cursor even when unfocused, so idle rows omit it.
+  assert.doesNotMatch(screen(h.view), /Search:|person, topic or source/);
+  assert.match(screen(h.view), /\/ search/);
+  key(h.view, "/");
+  assert.match(screen(h.view), /Search: /);
+  key(h.view, "roll", "\x1b"); // Leave search and keep the filter.
+  assert.match(screen(h.view), /Search: roll · \/ edit · Esc clears/);
+  assert.match(screen(h.view), /Review the rollout plan/);
+  key(h.view, "\x1b");
+  assert.doesNotMatch(screen(h.view), /Search:/);
   assert.equal(h.choice(), undefined);
-  assert.match(screen(h.view), /Second task/);
-  const unloaded = dashboard(emptyState(), 30, {
-    initial: { view: 2, search: "" },
-  });
-  assert.match(screen(unloaded.view), /Next not loaded/);
-  const empty = dashboard(emptyState(), 30, {
-    initial: { view: 2, search: "" },
-    data: { nextLoaded: true },
-  });
-  assert.match(screen(empty.view), /No open Next tasks in the cached read/);
-});
-
-test("duplicate Next titles and due dates do not trap selection", () => {
-  const h = dashboard(emptyState(), 30, {
-    initial: { view: 2, search: "" },
-    data: {
-      nextLoaded: true,
-      next: [
-        { title: "Same", due: null },
-        { title: "Same", due: null },
-        { title: "Last", due: null },
-      ],
-    },
-  });
-  screen(h.view);
-  key(h.view, "\x1b[B");
-  assert.match(screen(h.view), /2\/3 shown/);
-  key(h.view, "\x1b[D");
-  assert.match(screen(h.view), /2\/3 shown/);
-  key(h.view, "\x1b[B");
-  assert.match(screen(h.view), /› Last/);
-  assert.match(screen(h.view), /3\/3 shown/);
 });
 
 test("truncated table cells keep a visible separator before the next column", () => {
   const state = demoState(first);
   state.items[0].person = "Long person name ".repeat(10);
   state.items[0].draft = "Reviewed reply";
-  state.items[0].status = "resolved";
-  const h = dashboard(state, 30, { initial: { view: 4, search: "" } });
+  const h = dashboard(state, 30, { initial: { view: 1, search: "" } });
   const row = screen(h.view)
     .split("\n")
     .find((line) => line.includes("Review the rollout plan"));
@@ -1146,9 +1107,6 @@ test("expired snoozes do not separate the highlighted row from its action target
 test("Claude triage starts and cancels in place without closing the dashboard", async () => {
   const data = {
     state: demoState(first),
-    next: [],
-    nextStatus: "Not loaded",
-    nextLoaded: false,
   };
   const h = dashboard(data.state, 30, {
     demo: false,
@@ -1195,20 +1153,18 @@ test("worker progress and results never discard an inline draft editor", () => {
 test("multiline provider errors occupy only their allocated terminal rows", async () => {
   const h = dashboard(emptyState(), 30, {
     demo: false,
-    initial: { view: 2, search: "" },
     perform: async () => ({
       state: emptyState(),
-      next: [],
-      nextLoaded: false,
-      nextStatus: "Unavailable:\nPermission denied\nTry again",
-      notice: "Read failed\nDetails",
+      triageStatus: "Unavailable:\nPermission denied\nTry again",
+      notice: "Triage failed\nDetails",
     }),
   });
   screen(h.view);
   key(h.view, "\x12");
   await settled();
-  assert.match(screen(h.view), /Read failed Details/);
-  assert.match(screen(h.view), /Unavailable: Permission denied Try again/);
+  assert.match(screen(h.view), /Triage failed Details/);
+  key(h.view, "\x07");
+  assert.match(screen(h.view), /Triage: Unavailable:/);
   for (const line of h.view.render(120)) assert.ok(!/[\r\n]/.test(line));
 });
 
@@ -1664,24 +1620,16 @@ test("demo browsing never opens a real queue or starts a model", async (t) => {
   assert.equal(existsSync(join(h.directory, "comms")), false);
 });
 
-test("initial Next reads hold the browsing guard and release it after failure", async (t) => {
+test("/comms next is gone, so Comms never reads Reminders", async (t) => {
   const h = await harness(t);
   let screens = 0;
   h.ctx.ui.custom = async () => {
     screens++;
   };
-  // A fake uv always fails. Never invoke the real helper or Reminders app.
-  const pending = h.command.handler("next", h.ctx);
-  await h.command.handler("", h.ctx);
+  await h.command.handler("next", h.ctx);
   assert.equal(screens, 0);
-  await pending;
-  assert.ok(
-    h.notices.some((notice) =>
-      /Synthetic helper unavailable|requires your Mac/.test(notice),
-    ),
-  );
-  await h.command.handler("", h.ctx);
-  assert.equal(screens, 1);
+  assert.match(h.notices.at(-1), /Unknown Comms arguments: next/);
+  assert.doesNotMatch(h.notices.at(-1), /\/comms next/);
 });
 
 test("local draft saving stays in one overlay and persists without running a model", async (t) => {
@@ -1776,7 +1724,7 @@ test("session shutdown closes the inline Vim editor and unregisters its observer
   assert.ok(!store.read().items[0].draft.includes("Keep unsaved text"));
 });
 
-test("a manual resolve and reopen round trip wins over an in-flight triage resolution", async (t) => {
+test("a manual resolve and undo round trip wins over an in-flight triage resolution", async (t) => {
   const h = await harness(t);
   const store = new Store(join(h.directory, "comms"));
   store.update((state) =>
@@ -1791,7 +1739,7 @@ test("a manual resolve and reopen round trip wins over an in-flight triage resol
       () => {},
     );
     await view.perform({ action: "resolve", item: store.read().items[0] });
-    await view.perform({ action: "reopen", item: store.read().items[0] });
+    await view.perform({ action: "undo" });
     return undefined;
   };
   await h.command.handler("", h.ctx);
@@ -1824,14 +1772,10 @@ test("local actions preserve plan-mode restrictions and status updates do not ex
   const store = new Store(join(h.directory, "comms"));
   store.update((state) => Object.assign(state, demoState(first)));
   h.events.emit("dotfiles:plan-mode", true);
-  h.ctx.ui.custom = async (factory) => {
-    const view = factory(
-      h.tui,
-      getThemeByName("dark"),
-      getKeybindings(),
-      () => {},
-    );
-    screen(view);
+  await withDashboard(h, async (view) => {
+    key(view, "u");
+    await settled();
+    assert.match(screen(view), /Leave \/plan mode/);
     editDraft(view);
     key(view, "Blocked edit", "\x13");
     await settled();
@@ -1843,12 +1787,53 @@ test("local actions preserve plan-mode restrictions and status updates do not ex
     selectAction(view, "Resolve locally");
     await settled();
     assert.equal(store.read().items[0].status, "resolved");
-    assert.match(screen(view), /Local status updated/);
-    assert.match(screen(view), /Needs you 3/);
-    return undefined;
-  };
-  await h.command.handler("", h.ctx);
+    assert.match(screen(view), /Resolved locally\. Nothing sent\. u undoes\./);
+    assert.match(screen(view), /Needs you 2/);
+  });
   assert.equal(h.prompts.length, 0);
+});
+
+test("waiting returns after three days and u undoes decisions newest first", async (t) => {
+  const h = await harness(t);
+  const store = new Store(join(h.directory, "comms"));
+  store.update((state) => Object.assign(state, demoState(first)));
+  const [a, b] = visibleItems(store.read());
+  const find = (key) => store.read().items.find((row) => row.key === key);
+  await withDashboard(h, async (view) => {
+    let result = await view.perform({ action: "waiting", item: a });
+    assert.equal(result.notice, "Waiting. Back in 3 days at 09:00. u undoes.");
+    assert.equal(result.canUndo, true);
+    const waited = find(a.key);
+    assert.equal(waited.status, "waiting");
+    assert.equal(waited.decision, "waiting");
+    assert.equal(
+      waited.snoozedUntil,
+      snoozeUntil(new Date(waited.decidedAt), 3),
+    );
+    assert.ok(
+      Date.parse(waited.snoozedUntil) >
+        Date.parse(waited.decidedAt) + 2 * 86400000,
+    );
+    result = await view.perform({ action: "dismiss", item: b });
+    assert.match(result.notice, /^Dropped locally\. .* u undoes\.$/);
+    result = await view.perform({ action: "undo" });
+    assert.equal(result.notice, `Undone. ${b.title} is back.`);
+    assert.equal(result.select, b.key);
+    assert.deepEqual(find(b.key).status, "open");
+    assert.equal(find(b.key).decision, undefined);
+    // A change since the decision wins over a stale undo.
+    store.update((state) => {
+      state.items.find((row) => row.key === a.key).draftRevision++;
+    });
+    result = await view.perform({ action: "undo" });
+    assert.match(result.notice, /changed since\. Nothing undone/);
+    assert.equal(find(a.key).status, "waiting");
+    assert.equal(result.canUndo, false);
+    await assert.rejects(
+      () => view.perform({ action: "undo" }),
+      /Nothing to undo in this session/,
+    );
+  });
 });
 
 for (const mode of ["regular", "fullscreen"])
@@ -2355,40 +2340,6 @@ test("configured identity timezone and list propagate to prompts, helper argv an
   assert.equal(notesDirectory(), join(directory, "compatibility notes"));
 });
 
-test(
-  "configured Reminders list reaches the subprocess without reading real apps",
-  { skip: process.platform !== "darwin" },
-  async (t) => {
-    const h = await harness(t);
-    configured(t, { comms: { reminderList: "Synthetic Actions" } });
-    const bin = join(h.directory, "configured-reminders-bin");
-    mkdirSync(bin);
-    const log = join(h.directory, "reminders-argv.json");
-    writeFileSync(
-      join(bin, "uv"),
-      `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2))); console.log('[]');`,
-      { mode: 0o700 },
-    );
-    const previousPath = process.env.PATH;
-    process.env.PATH = `${bin}:${previousPath}`;
-    t.after(() => {
-      process.env.PATH = previousPath;
-    });
-    let rendered = "";
-    h.ctx.ui.custom = async (factory) => {
-      rendered = screen(
-        factory(h.tui, getThemeByName("dark"), getKeybindings(), () => {}),
-      );
-    };
-    await h.command.handler("next", h.ctx);
-    assert.deepEqual(
-      JSON.parse(readFileSync(log, "utf8")),
-      reminderArguments(),
-    );
-    assert.match(rendered, /Synthetic Actions/);
-  },
-);
-
 async function fakeConfiguredReminders(t) {
   const h = await harness(t);
   const original = {
@@ -2409,17 +2360,14 @@ async function fakeConfiguredReminders(t) {
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
-if (args[0] !== 'run' || args[1] !== ${JSON.stringify(packagePath("helpers", "to_next.py"))} || args[2] !== '--list' || ![4, 7].includes(args.length) || (args.length === 7 && (args[4] !== '--apply' || args[5] !== '--'))) {
+if (args[0] !== 'run' || args[1] !== ${JSON.stringify(packagePath("helpers", "to_next.py"))} || args[2] !== '--list' || args.length !== 7 || args[4] !== '--apply' || args[5] !== '--') {
   console.error('Unexpected fixture Reminders invocation'); process.exit(97);
 }
 const behavior = JSON.parse(fs.readFileSync(${JSON.stringify(behavior)}, 'utf8'));
 if (behavior.config) fs.writeFileSync(${JSON.stringify(config)}, JSON.stringify(behavior.config));
 if (behavior.queue) fs.writeFileSync(behavior.queue.file, JSON.stringify(behavior.queue.state));
 if (behavior.lock) fs.writeFileSync(behavior.lock, 'fixture competing writer', { flag: 'wx', mode: 0o600 });
-if (behavior.fail) { console.error('Fixture read unavailable'); process.exit(1); }
-console.log(JSON.stringify(args.length === 4
-  ? [{ title: 'Cached task from ' + args[3], due: null }]
-  : { list: args[3], mode: 'apply', added: [args[6]], skipped: [] }));
+console.log(JSON.stringify({ list: args[3], mode: 'apply', added: [args[6]], skipped: [] }));
 `,
     { mode: 0o700 },
   );
@@ -2432,62 +2380,6 @@ console.log(JSON.stringify(args.length === 4
     calls: () => readFileSync(log, "utf8").trim().split("\n").map(JSON.parse),
   };
 }
-
-for (const initialRead of [true, false])
-  test(
-    `Reminders ${initialRead ? "command" : "in-view"} read snapshot pins helper argv, timezone and UI through config changes`,
-    { skip: process.platform !== "darwin" },
-    async (t) => {
-      const h = await fakeConfiguredReminders(t);
-      const zones = [];
-      t.mock.method(Date.prototype, "toLocaleString", (_locale, options) => {
-        zones.push(options.timeZone);
-        return `fixture clock ${options.timeZone}`;
-      });
-      let data;
-      let rendered;
-      h.ctx.ui.custom = async (factory) => {
-        const view = factory(
-          h.tui,
-          getThemeByName("dark"),
-          getKeybindings(),
-          () => {},
-        );
-        if (!initialRead) {
-          // The view still offers its original list when configuration changes before refresh.
-          writeFileSync(h.config, JSON.stringify(h.changed));
-          view.setData(await view.perform({ action: "next" }));
-        }
-        data = view.data;
-        rendered = screen(view);
-      };
-      await h.command.handler(initialRead ? "next" : "", h.ctx);
-      assert.ok(data, h.notices.join("\n"));
-      assert.deepEqual(h.calls(), [
-        [
-          "run",
-          packagePath("helpers", "to_next.py"),
-          "--list",
-          "Original Actions",
-        ],
-      ]);
-      assert.deepEqual(zones, ["America/New_York"]);
-      assert.equal(data.reminderList, "Original Actions");
-      assert.deepEqual(data.next, [
-        { title: "Cached task from Original Actions", due: null },
-      ]);
-      assert.equal(data.nextLoaded, true);
-      assert.equal(
-        data.nextStatus,
-        "Read fixture clock America/New_York · Reminders Original Actions",
-      );
-      assert.doesNotMatch(rendered, /Changed Actions/);
-      assert.deepEqual(JSON.parse(readFileSync(h.config, "utf8")), h.changed);
-      await h.command.handler("status", h.ctx);
-      assert.ok(h.notices.at(-1).includes(data.nextStatus));
-      assert.deepEqual(h.prompts, []);
-    },
-  );
 
 test(
   "Reminders write snapshot keeps the displayed and confirmed list before and during the helper await",
@@ -2518,10 +2410,10 @@ test(
       assert.match(screen(view), /Added to Original Actions/);
       assert.doesNotMatch(screen(view), /Changed Actions|Later Actions/);
       assert.equal(view.data.reminderList, "Original Actions");
-      assert.equal(
-        view.data.nextStatus,
-        "A task was added. Ctrl+R refreshes Original Actions.",
-      );
+      // Undo reopens the item. The reminder stays and is never deleted.
+      key(view, "u");
+      await waitForScreen(view, /Undone\. The reminder stays in Original/);
+      assert.equal(store.read().items[0].status, "open");
     });
     assert.deepEqual(h.calls(), [
       [
@@ -2536,52 +2428,6 @@ test(
     ]);
     assert.equal(store.read().items[0].reminderAdded, title);
     assert.deepEqual(JSON.parse(readFileSync(h.config, "utf8")), afterWrite);
-    await h.command.handler("status", h.ctx);
-    assert.match(h.notices.at(-1), /Ctrl\+R refreshes Original Actions/);
-    assert.deepEqual(h.prompts, []);
-  },
-);
-
-test(
-  "reopened Reminders views never relabel cached rows from a different list, including after failed refresh",
-  { skip: process.platform !== "darwin" },
-  async (t) => {
-    const h = await fakeConfiguredReminders(t);
-    let initial;
-    h.ctx.ui.custom = async (factory) => {
-      initial = factory(
-        h.tui,
-        getThemeByName("dark"),
-        getKeybindings(),
-        () => {},
-      ).data;
-    };
-    await h.command.handler("next", h.ctx);
-    assert.ok(initial, h.notices.join("\n"));
-    assert.deepEqual(initial.next, [
-      { title: "Cached task from Original Actions", due: null },
-    ]);
-    writeFileSync(h.behavior, JSON.stringify({ fail: true }));
-    await withDashboard(h, async (view) => {
-      assert.equal(view.data.reminderList, "Changed Actions");
-      assert.deepEqual(view.data.next, []);
-      assert.equal(view.data.nextLoaded, false);
-      assert.match(view.data.nextStatus, /Not loaded/);
-      assert.match(screen(view), /Changed Actions not loaded/);
-      assert.doesNotMatch(screen(view), /Original Actions/);
-      view.setData(await view.perform({ action: "next" }));
-      assert.deepEqual(view.data.next, []);
-      assert.equal(view.data.nextLoaded, false);
-      assert.match(
-        view.data.nextStatus,
-        /Unavailable:.*Fixture read unavailable/,
-      );
-      assert.doesNotMatch(screen(view), /Original Actions/);
-    });
-    assert.deepEqual(
-      h.calls().map((args) => args[3]),
-      ["Original Actions", "Changed Actions"],
-    );
     assert.deepEqual(h.prompts, []);
   },
 );
@@ -2609,7 +2455,7 @@ test("letters act on the selected item and reach search only after /", async () 
 
 test("n opens a one-line Next editor from the first sentence and Enter adds it", async () => {
   const state = demoState(first);
-  const item = visibleItems(state, "Needs you")[0];
+  const item = visibleItems(state)[0];
   item.suggestion =
     "Review the plan today. Then reply with a decision.\n\nIf blocked, ask for time.";
   const h = dashboard(state, 30, { demo: false });
@@ -2641,7 +2487,7 @@ test("n on a legacy multi-action review opens its menu instead of closing it", (
   assert.equal(h.requests.length, 0);
 });
 
-test("Needs you shows the oldest eligible requests per priority after filters, with honest counts", async () => {
+test("Top shows the oldest requests per priority after filters, and the tabs carry the counts", async () => {
   const state = emptyState();
   ingest(
     state,
@@ -2659,11 +2505,10 @@ test("Needs you shows the oldest eligible requests per priority after filters, w
     item.firstSeenAt = new Date(Date.parse(first) + i * 3600000).toISOString();
   });
   state.items[3].status = "waiting";
+  state.items[3].snoozedUntil = "2999-01-01T00:00:00.000Z";
   state.items[4].snoozedUntil = "2999-01-01T00:00:00.000Z";
   assert.deepEqual(
-    visibleItems(state, "Needs you", "", Date.parse(second)).map(
-      (item) => item.sourceId,
-    ),
+    visibleItems(state, "", Date.parse(second)).map((item) => item.sourceId),
     ["r6", "r7", "r0", "r1", "r2", "r5"],
   );
   const h = dashboard(state, 30, {
@@ -2678,18 +2523,15 @@ test("Needs you shows the oldest eligible requests per priority after filters, w
   let text = screen(h.view);
   assert.equal((text.match(/Request r\d/g) || []).length, 5);
   assert.doesNotMatch(text, /Request r5/);
-  assert.match(text, /Needs you 6 /);
-  assert.ok(
-    text.includes(
-      `Needs you 5 of 6 · unresolved 8 · oldest eligible ${days} d`,
-    ),
-  );
+  assert.match(text, / Top 5 .* Needs you 6 /);
+  assert.ok(text.includes(`Comms · All sources · oldest ${days} d`));
+  assert.doesNotMatch(text, /unresolved|eligible| of 6/);
   key(h.view, "d");
   await settled();
   text = screen(h.view);
   assert.match(text, /Request r5/);
   assert.doesNotMatch(text, /Request r6/);
-  assert.ok(text.includes("Needs you 5 of 5 · unresolved 7"));
+  assert.match(text, / Top 5 .* Needs you 5 /);
   // Search applies before the cap, so a sixth row is still findable.
   const searched = dashboard(state, 30, {
     demo: false,
@@ -2697,37 +2539,66 @@ test("Needs you shows the oldest eligible requests per priority after filters, w
   });
   text = screen(searched.view);
   assert.match(text, /Request r5/);
-  assert.ok(text.includes("Needs you 1 of 1 · unresolved 1"));
+  assert.match(text, /Search: Request r5/);
+  for (const row of state.items) decide(row, "resolve");
+  assert.match(screen(searched.view), /Comms · All sources · all clear/);
+  assert.match(screen(searched.view), / Top 0 .* Needs you 0 /);
 });
 
-test("dispositions keep status and lifecycle fields consistent, and reopening starts a new cycle", () => {
+test("dispositions keep status and lifecycle fields consistent, and undo restores the earlier one", () => {
   const state = emptyState();
   ingest(state, "mail", "a", [candidate("one")], "complete", "ok", first);
   const item = state.items[0];
   assert.equal(item.firstSeenAt, first);
+  const later = "2999-01-01T00:00:00.000Z";
   for (const [action, status] of [
     ["next", "resolved"],
     ["drop", "dismissed"],
     ["resolve", "resolved"],
     ["waiting", "waiting"],
+    ["snooze", "open"],
   ]) {
-    decide(item, action, new Date(second));
+    decide(item, action, new Date(second), later);
     assert.equal(item.status, status);
     assert.equal(item.decision, action);
     assert.equal(item.decidedAt, second);
+    assert.equal(
+      item.snoozedUntil,
+      action === "waiting" || action === "snooze" ? later : undefined,
+    );
   }
-  decide(item, "snooze", new Date(second), "2999-01-01T00:00:00.000Z");
-  assert.equal(item.status, "open");
-  assert.equal(item.decision, "snooze");
-  assert.throws(() => decide(item, "snooze", new Date(second)), /end time/);
-  decide(item, "reopen", new Date(second));
-  assert.equal(item.reopenedAt, undefined); // A deferral is not a closure.
-  assert.equal(item.decision, undefined);
-  assert.equal(item.snoozedUntil, undefined);
-  decide(item, "drop", new Date(second));
-  decide(item, "reopen", new Date(second));
-  assert.equal(item.reopenedAt, second);
+  for (const action of ["snooze", "waiting"])
+    assert.throws(() => decide(item, action, new Date(second)), /end time/);
   assert.equal(validateState(state), state);
+  // Undo restores the exact earlier disposition once, and only while nothing
+  // else changed the item.
+  const other = emptyState();
+  ingest(other, "mail", "a", [candidate("two")], "complete", "ok", first);
+  const row = other.items[0];
+  row.reopenedAt = second;
+  const original = structuredClone(row);
+  const record = () => {
+    const before = disposition(row);
+    return (change) => {
+      change();
+      return {
+        key: row.key,
+        before,
+        after: disposition(row),
+        revision: row.draftRevision,
+      };
+    };
+  };
+  const dropped = record()(() => decide(row, "drop", new Date(second)));
+  assert.equal(undo(row, dropped), true);
+  assert.deepEqual({ ...row, draftRevision: original.draftRevision }, original);
+  assert.equal(row.draftRevision, original.draftRevision + 2);
+  assert.equal(undo(row, dropped), false);
+  const resolved = record()(() => decide(row, "resolve", new Date(second)));
+  row.draftRevision++; // A refresh or another session changed it since.
+  assert.equal(undo(row, resolved), false);
+  assert.equal(row.status, "resolved");
+  assert.equal(validateState(other), other);
   // Newer activity on a closed item reopens it and keeps firstSeenAt.
   const third = "2026-10-18T12:00:00.000Z";
   decide(item, "resolve", new Date(second));
@@ -2773,8 +2644,7 @@ test("dispositions keep status and lifecycle fields consistent, and reopening st
   assert.equal(item.decidedAt, fourth);
   // Newer activity on a waiting item ends the deferral without a reopening.
   const fifth = "2026-10-18T14:00:00.000Z";
-  decide(item, "reopen", new Date(fourth));
-  decide(item, "waiting", new Date(fourth));
+  decide(item, "waiting", new Date(fourth), later);
   ingest(
     state,
     "mail",
@@ -2786,7 +2656,8 @@ test("dispositions keep status and lifecycle fields consistent, and reopening st
   );
   assert.equal(item.status, "open");
   assert.equal(item.decision, undefined);
-  assert.equal(item.reopenedAt, fourth);
+  assert.equal(item.snoozedUntil, undefined);
+  assert.equal(item.reopenedAt, third);
   for (const bad of [
     { decision: "sent" },
     { decidedAt: "yesterday" },
@@ -2800,7 +2671,7 @@ test("dispositions keep status and lifecycle fields consistent, and reopening st
 
 test("closed items show they reopened, and closing the shown item returns to the list", async () => {
   const state = demoState(first);
-  const item = visibleItems(state, "Needs you")[0];
+  const item = visibleItems(state)[0];
   item.reopenedAt = second;
   const h = dashboard(state, 30, {
     demo: false,
@@ -2830,7 +2701,7 @@ for (const change of ["none", "source", "local"])
       const h = await fakeConfiguredReminders(t);
       const store = new Store(join(h.directory, "comms"));
       store.update((state) => Object.assign(state, demoState(first)));
-      const itemKey = visibleItems(store.read(), "Needs you")[0].key;
+      const itemKey = visibleItems(store.read())[0].key;
       const changed = store.read();
       const row = changed.items.find((item) => item.key === itemKey);
       if (change === "source") {
@@ -2883,7 +2754,7 @@ test(
     });
     rmSync(lock);
     assert.equal(h.calls().filter((args) => args.length === 7).length, 1);
-    const item = visibleItems(store.read(), "Needs you")[0];
+    const item = visibleItems(store.read())[0];
     assert.equal(item.reminderAdded, undefined);
     assert.equal(item.status, "open");
   },
@@ -2954,7 +2825,7 @@ test("new collector notes are one short line while saved legacy uncertainty keep
 
 test("drafts record their origin per save path and show it, never as delivery", () => {
   const state = demoState(first);
-  const item = visibleItems(state, "Needs you")[0];
+  const item = visibleItems(state)[0];
   setDraft(state, item.key, item.draftRevision, "Edited by hand");
   assert.equal(item.draftOrigin, "manual");
   setDraft(state, item.key, item.draftRevision, "From the AI action", "ai");

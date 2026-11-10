@@ -19,26 +19,25 @@ import {
 } from "@earendil-works/pi-tui";
 import { createVimEditor } from "../vim/index.ts";
 import {
-  backlog,
   clean,
   collectionSources,
   errorMessage,
   needsYouCap,
+  oldestDays,
   sources,
   views,
   visibleItems,
+  waitingDays,
   type Item,
   type Source,
   type State,
 } from "./state.ts";
 
-export type NextTask = { title: string; due: string | null };
 export type ViewState = {
   view: number;
   search: string;
   source?: Source;
   selected?: string;
-  task?: string;
 };
 export type Choice = {
   action: "refresh" | "draft-ai";
@@ -48,17 +47,15 @@ export type Choice = {
 export type DashboardData = {
   state: State;
   reminderList?: string;
-  next: NextTask[];
-  nextStatus: string;
-  nextLoaded: boolean;
   triageStatus?: string;
   triageRunning?: boolean;
+  canUndo?: boolean;
 };
 export type LocalAction =
   | "refresh"
   | "cancel-triage"
   | "reload"
-  | "next"
+  | "undo"
   | "reset-demo"
   | "save-draft"
   | "copy"
@@ -68,14 +65,14 @@ export type LocalAction =
   | "snooze"
   | "waiting"
   | "resolve"
-  | "dismiss"
-  | "reopen";
+  | "dismiss";
 export type ActionRequest = {
   action: LocalAction;
   item?: Item;
   text?: string;
 };
-export type ActionResult = DashboardData & { notice?: string };
+// select moves the highlight to a restored item after an undo.
+export type ActionResult = DashboardData & { notice?: string; select?: string };
 type EditState = {
   item: Item;
   action: "save-draft" | "add-next";
@@ -122,18 +119,14 @@ function age(timestamp: string): string {
 function itemStatus(item: Item): string {
   if (item.draftStale) return "Review draft";
   if (reopened(item)) return "↺ reopened";
-  if (item.snoozedUntil && Date.parse(item.snoozedUntil) > Date.now())
-    return "Snoozed";
+  if (item.status === "waiting") return "Still waiting?";
   return `${item.status}${item.draft ? " · draft ready" : ""}`;
-}
-function taskKey(task: NextTask): string {
-  return JSON.stringify([task.title, task.due]);
 }
 
 export class Dashboard implements Component, Focusable {
   private input = new Input({
     prompt: "Search: ",
-    placeholder: "press / to search person, topic or source",
+    placeholder: "person, topic or source",
   });
   // Letters act on the selected item unless / focused the search box.
   private searching = false;
@@ -144,7 +137,6 @@ export class Dashboard implements Component, Focusable {
   private view: number;
   private source?: Source;
   private selected?: string;
-  private task?: string;
   private screen: "list" | "detail" | "coverage" = "list";
   private detailScroll = 0;
   private detailExpanded = false;
@@ -173,11 +165,10 @@ export class Dashboard implements Component, Focusable {
     initial: ViewState = { view: 0, search: "" },
     private onTerminalInput?: ExtensionUIContext["onTerminalInput"],
   ) {
-    this.view = initial.view;
+    this.view = Math.min(Math.max(0, initial.view), views.length - 1);
     this.source = initial.source;
     this.input.setValue(initial.search);
     this.selected = initial.selected;
-    this.task = initial.task;
     this.refilter();
   }
 
@@ -214,7 +205,6 @@ export class Dashboard implements Component, Focusable {
       search: this.input.getValue(),
       source: this.source,
       selected: this.selected,
-      task: this.task,
     };
   }
   setData(data: DashboardData): void {
@@ -228,52 +218,30 @@ export class Dashboard implements Component, Focusable {
     this.notice = singleLine(message);
     this.tui.requestRender();
   }
-  private rows(query = this.input.getValue(), view = views[this.view]): Item[] {
-    return visibleItems(this.data.state, view, query).filter(
+  private rows(query = this.input.getValue()): Item[] {
+    return visibleItems(this.data.state, query).filter(
       (item) => !this.source || item.source === this.source,
     );
   }
-  private tasks(query = this.input.getValue()): NextTask[] {
-    return this.data.next.filter((task) =>
-      task.title.toLowerCase().includes(query.toLowerCase()),
-    );
-  }
   private item(): Item | undefined {
-    return this.view === 2
-      ? undefined
-      : this.visible.find((row) => row.key === this.selected);
+    return this.visible.find((row) => row.key === this.selected);
   }
   private refilter(): void {
     const previous = this.selected;
     const rows = this.rows();
-    // Needs you shows the top few eligible rows after filtering. Deciding one
-    // reveals the next. Other views stay uncapped.
+    // Top shows the first few rows after filtering. Deciding one reveals the
+    // next. Needs you lists them all.
     this.visible =
-      views[this.view] === "Needs you" ? rows.slice(0, needsYouCap) : rows;
-    const list = this.view === 2 ? this.tasks() : this.visible;
-    const matches = (row: Item | NextTask) =>
-      "key" in row ? row.key === this.selected : taskKey(row) === this.task;
-    // Next has no stable reminder IDs. Identical title/due pairs must still be
-    // navigable, so retain a matching current index before searching by key.
-    const index =
-      list[this.selection] && matches(list[this.selection])
-        ? this.selection
-        : list.findIndex(matches);
+      views[this.view] === "Top" ? rows.slice(0, needsYouCap) : rows;
+    const index = this.visible.findIndex((row) => row.key === this.selected);
     this.selection =
       index >= 0
         ? index
-        : Math.max(0, Math.min(this.selection, list.length - 1));
-    if (this.view === 2)
-      this.task = this.tasks()[this.selection]
-        ? taskKey(this.tasks()[this.selection])
-        : undefined;
-    else this.selected = this.visible[this.selection]?.key;
+        : Math.max(0, Math.min(this.selection, this.visible.length - 1));
+    this.selected = this.visible[this.selection]?.key;
     // A closed or vanished item returns to the list instead of silently
     // showing the next request in its place.
-    if (
-      this.screen === "detail" &&
-      (!this.item() || (this.view !== 2 && this.selected !== previous))
-    )
+    if (this.screen === "detail" && this.selected !== previous)
       this.screen = "list";
     this.syncFocus();
   }
@@ -301,6 +269,7 @@ export class Dashboard implements Component, Focusable {
       });
       if (this.disposed) return;
       this.data = result;
+      if (result.select) this.selected = result.select;
       this.notice = singleLine(result.notice || "");
       this.menu = undefined;
       if (action === "save-draft" || action === "add-next") this.closeEditor();
@@ -360,29 +329,17 @@ export class Dashboard implements Component, Focusable {
           ]
         : []),
     ];
-    const closed = item.status === "resolved" || item.status === "dismissed";
+    // Every listed item is open or a returned wait. Deferrals come back by
+    // date and u undoes a decision, so no entry reopens anything.
     const entries = [
       ...requestActions,
-      ...(!closed
-        ? [
-            { value: "snooze", label: "Snooze until tomorrow at 09:00" },
-            ...(item.status !== "waiting"
-              ? [{ value: "waiting", label: "Mark waiting" }]
-              : []),
-            { value: "resolve", label: "Resolve locally" },
-            { value: "dismiss", label: "Dismiss locally" },
-          ]
-        : []),
-      ...(closed ||
-      item.status === "waiting" ||
-      (item.snoozedUntil && Date.parse(item.snoozedUntil) > Date.now())
-        ? [
-            {
-              value: "reopen",
-              label: closed ? "Reopen locally" : "Return to Needs you",
-            },
-          ]
-        : []),
+      { value: "snooze", label: "Snooze until tomorrow at 09:00" },
+      {
+        value: "waiting",
+        label: `${item.status === "waiting" ? "Still waiting" : "Waiting for a reply"} · back in ${waitingDays} days`,
+      },
+      { value: "resolve", label: "Resolve locally" },
+      { value: "dismiss", label: "Dismiss locally" },
     ];
     // Reserve room for the border, request identity, hints and scroll indicator.
     const maxVisible = Math.max(1, this.tui.terminal.rows - 11);
@@ -516,7 +473,6 @@ export class Dashboard implements Component, Focusable {
       this.syncFocus();
     } else if (matchesKey(data, "ctrl+r")) {
       if (this.demo) void this.run("reset-demo");
-      else if (this.view === 2 && this.screen === "list") void this.run("next");
       else void this.run("refresh");
     } else if (
       matchesKey(data, "ctrl+x") &&
@@ -554,16 +510,11 @@ export class Dashboard implements Component, Focusable {
       if (offset && this.screen !== "list")
         this.detailScroll = Math.max(0, this.detailScroll + offset);
       else if (offset) {
-        const list = this.view === 2 ? this.tasks() : this.visible;
         this.selection = Math.max(
           0,
-          Math.min(list.length - 1, this.selection + offset),
+          Math.min(this.visible.length - 1, this.selection + offset),
         );
-        if (this.view === 2)
-          this.task = this.tasks()[this.selection]
-            ? taskKey(this.tasks()[this.selection])
-            : undefined;
-        else this.selected = this.visible[this.selection]?.key;
+        this.selected = this.visible[this.selection]?.key;
         this.notice = "";
       } else if (this.screen === "list") {
         if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
@@ -574,7 +525,7 @@ export class Dashboard implements Component, Focusable {
           this.scroll = 0;
           this.notice = "";
           this.refilter();
-        } else if (matchesKey(data, "ctrl+o") && this.view !== 2) {
+        } else if (matchesKey(data, "ctrl+o")) {
           const options: Array<Source | undefined> = [undefined, ...sources];
           this.source =
             options[(options.indexOf(this.source) + 1) % options.length];
@@ -592,10 +543,11 @@ export class Dashboard implements Component, Focusable {
         } else if (data === "/") {
           this.searching = true;
           this.syncFocus();
-        } else if (data === "n" || data === "d") {
+        } else if (data === "u") void this.run("undo");
+        else if (data === "n" || data === "d") {
           const item = this.item();
           if (!item) {
-            /* Nothing selected, or the Next view. */
+            /* Nothing selected. */
           } else if (data === "d") void this.run("dismiss", item);
           else if (
             !(collectionSources as readonly string[]).includes(item.source)
@@ -659,6 +611,11 @@ export class Dashboard implements Component, Focusable {
         item.suggestion || "Review the original before choosing an action.",
         bold,
       ),
+      ...(item.status === "waiting"
+        ? text("Still waiting? Check whether the reply came.", (line) =>
+            th.fg("warning", line),
+          )
+        : []),
       ...(item.reminderAdded
         ? text(
             `Added to ${this.data.reminderList || "Next"}: ${item.reminderAdded}`,
@@ -721,9 +678,6 @@ export class Dashboard implements Component, Focusable {
           muted,
         ),
         ...text(`Source updated: ${item.sourceUpdatedAt}`, muted),
-        ...(item.snoozedUntil
-          ? text(`Snoozed until: ${item.snoozedUntil}`, muted)
-          : []),
         ...(item.url ? text(`Original: ${item.url}`, muted) : []),
       );
     return lines;
@@ -745,23 +699,18 @@ export class Dashboard implements Component, Focusable {
           "",
         ]);
       }),
-      `Reminders ${this.data.reminderList || "Next"}: ${this.data.nextStatus}`,
       ...(this.data.triageStatus ? [`Triage: ${this.data.triageStatus}`] : []),
     ];
   }
-  // Counts follow the current source and search filters. Unresolved includes
-  // waiting and snoozed items, so deferring work does not look like progress.
+  // The tabs carry the counts. The header keeps the age of the oldest request
+  // under the current source filter.
   private summary(): string {
-    const counts = backlog(this.rows(undefined, "All"));
-    return `Needs you ${Math.min(needsYouCap, counts.eligible)} of ${counts.eligible} · unresolved ${counts.unresolved} · oldest eligible ${counts.oldestDays} d`;
+    const rows = this.rows("");
+    return rows.length ? `oldest ${oldestDays(rows)} d` : "all clear";
   }
   private emptyLabel(): string {
     if (this.input.getValue()) return "No matches. Esc clears search.";
-    if (this.view === 2)
-      return this.data.nextLoaded
-        ? `No open ${this.data.reminderList || "Next"} tasks in the cached read.`
-        : `${this.data.reminderList || "Next"} not loaded. Ctrl+R reads Reminders.`;
-    return "No retained requests in this view. Ctrl+R starts triage.";
+    return "Nothing needs you. Ctrl+R starts triage.";
   }
   private tableLine(width: number, item?: Item, index = 0): string {
     const source = width >= 55 ? 9 : 0;
@@ -863,9 +812,7 @@ export class Dashboard implements Component, Focusable {
       th.bold(this.demo ? "Comms · DEMO · no external actions" : "Comms") +
       th.fg(
         "dim",
-        this.view === 2
-          ? ` · Reminders ${this.data.reminderList || "Next"}`
-          : ` · ${this.source ? sourceNames[this.source] : "All sources"} · ${this.summary()}`,
+        ` · ${this.source ? sourceNames[this.source] : "All sources"} · ${this.summary()}`,
       );
     const healthLine = th.fg(
       health.incomplete ? "warning" : "dim",
@@ -921,14 +868,10 @@ export class Dashboard implements Component, Focusable {
       );
       return this.frame(lines, width, height);
     }
+    const all = this.rows("").length;
     const tabs = views
       .map((name, i) => {
-        const count =
-          i === 2
-            ? this.data.nextLoaded
-              ? this.data.next.length
-              : "?"
-            : this.rows("", name).length;
+        const count = name === "Top" ? Math.min(needsYouCap, all) : all;
         const text = ` ${name} ${count} `;
         return i === this.view
           ? th.bg("selectedBg", th.bold(text))
@@ -941,8 +884,19 @@ export class Dashboard implements Component, Focusable {
       visibleWidth(tabs) <= w
         ? tabs
         : th.fg("accent", `${views[this.view]} · Tab views`),
+      // The search box only renders while typing. Pi's Input draws its cursor
+      // even when unfocused, which would suggest letters go to search.
       ...(this.screen === "list"
-        ? this.input.render(w)
+        ? this.searching
+          ? this.input.render(w)
+          : this.input.getValue()
+            ? [
+                th.fg(
+                  "dim",
+                  `Search: ${singleLine(this.input.getValue())} · / edit · Esc clears`,
+                ),
+              ]
+            : []
         : [
             th.fg(
               "dim",
@@ -988,14 +942,8 @@ export class Dashboard implements Component, Focusable {
       );
       return this.frame(lines, width, height);
     }
-    const taskView = this.view === 2;
-    const list = taskView ? this.tasks() : this.visible;
-    lines.push(
-      th.fg(
-        "dim",
-        taskView ? pad("  Next action", w - 12) + "Due" : this.tableLine(w),
-      ),
-    );
+    const list = this.visible;
+    lines.push(th.fg("dim", this.tableLine(w)));
     const bodyHeight = Math.max(1, height - lines.length - 6);
     this.pageSize = bodyHeight;
     if (this.selection < this.scroll) this.scroll = this.selection;
@@ -1009,24 +957,14 @@ export class Dashboard implements Component, Focusable {
         lines.push(i === 0 ? th.fg("muted", this.emptyLabel()) : "");
         continue;
       }
-      const text =
-        "key" in item
-          ? this.tableLine(w, item, index)
-          : pad(
-              `${index === this.selection ? "›" : " "} ${singleLine(item.title)}`,
-              w - 12,
-            ) + singleLine(item.due || "");
+      const text = this.tableLine(w, item, index);
       lines.push(
         index === this.selection
           ? th.bg("selectedBg", th.fg("text", text))
-          : th.fg(
-              "key" in item && item.priority === 1 ? "warning" : "text",
-              text,
-            ),
+          : th.fg(item.priority === 1 ? "warning" : "text", text),
       );
     }
     const item = this.item();
-    const task = taskView ? this.tasks()[this.selection] : undefined;
     lines.push(
       th.fg("border", "─".repeat(w)),
       th.bold(
@@ -1034,27 +972,16 @@ export class Dashboard implements Component, Focusable {
           ? singleLine(
               `${item.person} · ${sourceNames[item.source]} · ${itemStatus(item)}`,
             )
-          : task
-            ? singleLine(task.title)
-            : "",
+          : "",
       ),
-      th.fg(
-        "muted",
-        item
-          ? `AI summary: ${singleLine(item.summary)}`
-          : task
-            ? `Due: ${singleLine(task.due || "No due date")}`
-            : "",
-      ),
+      th.fg("muted", item ? `AI summary: ${singleLine(item.summary)}` : ""),
       th.fg(
         item?.draftStale ? "warning" : "muted",
         item
           ? item.draftStale
             ? "Source changed. Review the saved draft before using it."
             : `Suggested action: ${singleLine(item.suggestion)}`
-          : taskView
-            ? singleLine(this.data.nextStatus)
-            : "",
+          : "",
       ),
       th.fg(
         this.notice ? "warning" : "dim",
@@ -1068,9 +995,11 @@ export class Dashboard implements Component, Focusable {
           ? "Working · wait for the result before retrying"
           : this.data.triageRunning
             ? "Claude triage running · ^X cancel · ^L reload local · Esc"
-            : w >= 100
-              ? "n Next · d Drop · / search · Enter details · Tab views · ^O source · ^R triage · ^G coverage · Esc"
-              : "n Next · d Drop · / search · Enter details · Tab · Esc",
+            : `n Next · d Drop${this.data.canUndo ? " · u Undo" : ""} · / search · Enter details · ${
+                w >= 110
+                  ? "Tab views · ^O source · ^R triage · ^G coverage · Esc"
+                  : "Tab · Esc"
+              }`,
       ),
     );
     return this.frame(lines, width, height);

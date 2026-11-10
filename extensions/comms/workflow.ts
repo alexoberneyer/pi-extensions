@@ -54,7 +54,8 @@ export function reminderArguments(
     ...(titles.length ? ["--apply", "--", ...titles] : []),
   ];
 }
-export function snoozeUntil(now = new Date()): string {
+// 09:00 local time, the given number of days ahead.
+export function snoozeUntil(now = new Date(), days = 1): string {
   const zone = readConfig().identity.timeZone;
   const parts = (date: Date) =>
     Object.fromEntries(
@@ -73,7 +74,7 @@ export function snoozeUntil(now = new Date()): string {
         .map((part) => [part.type, Number(part.value)]),
     );
   const local = parts(now);
-  const target = Date.UTC(local.year, local.month - 1, local.day + 1, 9);
+  const target = Date.UTC(local.year, local.month - 1, local.day + days, 9);
   let stamp = target;
   for (let attempt = 0; attempt < 4; attempt++) {
     const p = parts(new Date(stamp));

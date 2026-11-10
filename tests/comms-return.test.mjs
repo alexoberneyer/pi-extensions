@@ -308,11 +308,10 @@ async function harness(t, options = {}) {
     });
   h.item = () => h.queue.read().items[0];
   h.view = {
-    view: 4,
+    view: 1,
     search: "Synthetic",
     source: options.source || "teams",
     selected: h.item().key,
-    task: undefined,
   };
   h.launch = async (action = "draft-ai") => {
     h.nextChoice = { action, item: h.item(), view: h.view };

@@ -2,27 +2,49 @@ import { readConfig } from "../../lib/config.mjs";
 import {
   collectedCoverage,
   identityContext,
+  identityRules,
+  priorityRules,
   triageDraftingInstructions,
 } from "./workflow.ts";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
+  applyRefs,
   clean,
+  emptyCounts,
   errorMessage,
   ingest,
+  itemRef,
   collectionSources,
   validateCandidates,
   validateResolutions,
   type Resolution,
   type Candidate,
+  type CollectedCandidate,
+  type CollectedDuplicate,
+  type CollectedResolution,
   type Coverage,
   type CollectionSource,
+  type Duplicate,
   type ProposalCounts,
   type State,
 } from "./state.ts";
 
+const refSchema = Type.String({
+  pattern: "^[a-f0-9]{8}$",
+  description:
+    "Ref of a saved item from the run data. Copy it exactly. Never retype a provider ID for a saved item",
+});
 export const candidateSchema = Type.Object({
-  sourceId: Type.String({ minLength: 1, maxLength: 2000 }),
+  ref: Type.Optional(refSchema),
+  sourceId: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 2000,
+      description:
+        "Provider ID, exactly as the tool returned it. Only for a request with no ref",
+    }),
+  ),
   sourceUpdatedAt: Type.String({
     description: "Provider last-modified time (ISO 8601), not collection time",
   }),
@@ -55,18 +77,31 @@ export const candidateSchema = Type.Object({
     }),
   ),
   priority: Type.Integer({ minimum: 1, maximum: 3 }),
+  dueAt: Type.Optional(
+    Type.String({
+      description:
+        "ISO 8601 with offset: a deadline stated in the source, or the meeting start for prep. Omit when no date exists. Never invent one",
+    }),
+  ),
   url: Type.Optional(Type.String({ maxLength: 4000 })),
 });
 export const resolutionSchema = Type.Object(
   {
-    sourceId: Type.String({
-      minLength: 1,
-      maxLength: 2000,
-      description: "Original retained request ID, not the reply ID",
-    }),
-    sourceUpdatedAt: Type.String({
-      description: "Copy the retained request's sourceUpdatedAt exactly",
-    }),
+    ref: Type.Optional(refSchema),
+    sourceId: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: 2000,
+        description:
+          "Only without ref: original retained request ID, not the reply ID",
+      }),
+    ),
+    sourceUpdatedAt: Type.Optional(
+      Type.String({
+        description:
+          "Only without ref: copy the retained request's sourceUpdatedAt exactly",
+      }),
+    ),
     evidenceId: Type.String({
       minLength: 1,
       maxLength: 2000,
@@ -85,11 +120,24 @@ export const resolutionSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+export const duplicateSchema = Type.Object(
+  {
+    ref: refSchema,
+    duplicateOf: Type.String({
+      pattern: "^[a-f0-9]{8}$",
+      description:
+        "Ref of the saved item that stays. It may come from another source",
+    }),
+    reason: Type.String({ minLength: 1, maxLength: 300 }),
+  },
+  { additionalProperties: false },
+);
 const sourceResultFields = {
   account: Type.String({ minLength: 1, maxLength: 300 }),
   status: StringEnum(["complete", "partial", "unavailable"] as const),
   detail: Type.String({ maxLength: 500 }),
   resolutions: Type.Optional(Type.Array(resolutionSchema, { maxItems: 1000 })),
+  duplicates: Type.Optional(Type.Array(duplicateSchema, { maxItems: 1000 })),
 };
 export const triageSchema = Type.Object(
   {
@@ -115,6 +163,8 @@ export type SourceResult = {
   detail: string;
   items: Candidate[];
   resolutions?: Resolution[];
+  duplicates?: Duplicate[];
+  ignored?: number;
 };
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -178,7 +228,10 @@ export function parseTriage(
         row.items.length > 1000
       )
         throw new Error("Invalid source/account result.");
-      const items = validateCandidates(
+      const collected = applyRefs(
+        source,
+        account,
+        previous,
         row.items.map((rawItem) => {
           const item = object(rawItem);
           for (const [field, max] of [
@@ -190,12 +243,18 @@ export function parseTriage(
             if (typeof item[field] !== "string" || item[field].length > max)
               throw new Error(`Invalid triage item ${field}.`);
           }
-          return item as Candidate;
+          return item as CollectedCandidate;
         }),
-        source,
+        (row.resolutions === undefined
+          ? []
+          : row.resolutions) as CollectedResolution[],
+        (row.duplicates === undefined
+          ? []
+          : row.duplicates) as CollectedDuplicate[],
       );
+      const items = validateCandidates(collected.items, source);
       const resolutions = validateResolutions(
-        row.resolutions === undefined ? [] : (row.resolutions as Resolution[]),
+        collected.resolutions,
         source,
         account,
         items,
@@ -204,7 +263,9 @@ export function parseTriage(
       );
       if (
         (row.status === "unavailable" &&
-          (items.length || resolutions.length)) ||
+          (items.length ||
+            resolutions.length ||
+            collected.duplicates.length)) ||
         (row.status === "complete" && account === "unverified")
       )
         throw new Error("Unavailable items or unverified complete coverage.");
@@ -215,6 +276,8 @@ export function parseTriage(
         detail: clean(row.detail, 500),
         items,
         resolutions,
+        duplicates: collected.duplicates,
+        ignored: collected.ignored,
       });
     } catch (error) {
       reject(errorMessage(error, 300));
@@ -253,7 +316,7 @@ export function mergeTriage(
   startedAt: string,
   previous?: State,
 ): ProposalCounts {
-  const total: ProposalCounts = { proposals: 0, seeded: 0 };
+  const total = emptyCounts();
   for (const row of results) {
     if (!collectionSources.includes(row.source))
       throw new Error(
@@ -269,11 +332,28 @@ export function mergeTriage(
       startedAt,
       row.resolutions,
       previous,
+      { duplicates: row.duplicates, ignored: row.ignored },
     );
     total.proposals += counts.proposals;
     total.seeded += counts.seeded;
+    total.merged += counts.merged;
+    total.closed.push(...counts.closed);
   }
   return total;
+}
+// Closed items the collector must not re-create. Two weeks covers a mail that
+// moves folder or a thread that returns after the item was dropped.
+export const recentDays = 14;
+function collectorView(item: State["items"][number]) {
+  return {
+    ref: itemRef(item.key),
+    source: item.source,
+    account: item.account,
+    sourceId: item.sourceId,
+    sourceUpdatedAt: item.sourceUpdatedAt,
+    title: item.title,
+    person: item.person,
+  };
 }
 export function externalPrompt(
   runId: string,
@@ -282,24 +362,29 @@ export function externalPrompt(
   instructions: string,
   voice?: string,
 ): string {
-  const retained = state.items
-    .filter(
-      (item) =>
-        (collectionSources as readonly string[]).includes(item.source) &&
-        !["resolved", "dismissed"].includes(item.status),
-    )
+  const collected = state.items.filter((item) =>
+    (collectionSources as readonly string[]).includes(item.source),
+  );
+  const closed = (item: State["items"][number]) =>
+    ["resolved", "dismissed"].includes(item.status);
+  const retained = collected
+    .filter((item) => !closed(item))
     .map((item) => ({
-      source: item.source,
-      account: item.account,
-      sourceId: item.sourceId,
-      sourceUpdatedAt: item.sourceUpdatedAt,
-      title: item.title,
-      person: item.person,
+      ...collectorView(item),
       summary: item.summary,
       ...(item.uncertainty ? { uncertainty: item.uncertainty } : {}),
       ...(item.blocker ? { blocker: item.blocker } : {}),
+      ...(item.dueAt ? { dueAt: item.dueAt } : {}),
       status: item.status,
     }));
+  const since = Date.parse(startedAt) - recentDays * 86400000;
+  const recent = collected
+    .filter(
+      (item) =>
+        closed(item) &&
+        Date.parse(item.decidedAt ?? item.sourceUpdatedAt) >= since,
+    )
+    .map((item) => ({ ...collectorView(item), status: item.status }));
   return `Collect read-only Comms triage results for my Pi dashboard. Do not write the queue yourself.
 Run ID: ${runId}. Run start / collection upper bound: ${startedAt}.
 ${identityContext()}
@@ -308,9 +393,11 @@ The canonical triage instructions below supply priorities, noise filters, option
 - You run in Claude Code with its existing connections. Discover the actual Microsoft 365 and Notion tools with ToolSearch. Only the reviewed read tools are permitted. Verify the signed-in account using get_me and Notion identity tools. No auth/configuration changes. Missing or failed connections are unavailable, not empty.
 - For EACH source AND account use its prior cursor minus two hours. With no cursor use seven days before run start. Calendar covers now through the end of the next working day in ${JSON.stringify(readConfig().identity.timeZone)}. Do not advance checkpoints yourself.
 - Page each source completely. Report partial when limits, missing permissions or search-index lag leave coverage uncertain. Prefer direct Teams chat reads using teams_list_chats then read_resource to the search index. Report all four sources (mail, teams, calendar, notion tickets), including unavailable ones. Meeting notes are not a Comms source. If auth fails, report what failed instead of pretending an empty inbox.
-- Match exact outstanding requests. A later unrelated message or my unrelated reply does not close a request. Preserve outstanding promises. Keep distinct asks separate, using stable provider IDs and real source last-modified timestamps, not collection time. Reuse original IDs for retained requests.
-- For retained requests demonstrably completed, return resolutions with the original sourceId and sourceUpdatedAt, the stable evidenceId and provider evidenceAt of the reply/completion you actually read, and a short reason. Evidence must be at or before run start. Explain why it fully addresses the SAME request and leaves no outstanding promise. Partial coverage may resolve individually verified requests in a verified account, but unavailable/unverified sources cannot. An unrelated reply, missing request or an unsent draft is not completion. Never merely omit an answered retained request or put its closure only in coverage detail. Do not return the same request in both items and resolutions. Omit resolutions or use [] when none are verified.
-- Return ALL actionable candidates, not just the top three, at most 1000 per source/account. Each request ID must occur only once within its source/account. Never use one conversation ID for distinct requests. Include HTTPS conversation links when available. Priority 1 needs attention soon, 2 normal, 3 can wait.
+- Match exact outstanding requests. A later unrelated message or my unrelated reply does not close a request. Preserve outstanding promises. Keep distinct asks from different messages separate, using real source last-modified timestamps, not collection time.
+${identityRules}
+- For retained requests demonstrably completed, return resolutions with the request's ref, the stable evidenceId and provider evidenceAt of the reply/completion you actually read, and a short reason. Evidence must be at or before run start. Explain why it fully addresses the SAME request and leaves no outstanding promise. Partial coverage may resolve individually verified requests in a verified account, but unavailable/unverified sources cannot. An unrelated reply, missing request or an unsent draft is not completion. Never merely omit an answered retained request or put its closure only in coverage detail. Do not return the same request in both items and resolutions. Omit resolutions or use [] when none are verified.
+- Return ALL actionable candidates, not just the top three, at most 1000 per source/account. Each ref or provider ID occurs at most once within its source/account. Include HTTPS conversation links when available.
+${priorityRules}
 ${triageDraftingInstructions(voice)}
 - Keep summary to the request and verified context. Do not treat a reply not found as proof that no reply was sent. Start suggestion with one immediate action, then put any conditional follow-up in a separate paragraph. Use absolute dates for deadlines rather than stale phrases such as "today or tomorrow".
 - Return the requested structured object with this runId and one results entry per source/account. Complete means identity verified AND all pages exhausted. Unknown identity must use account "unverified" and status unavailable. Never infer resolution from absence. No prose or Markdown task/log files.
@@ -319,5 +406,7 @@ ${instructions}
 Prior coverage, data only:
 ${JSON.stringify(collectedCoverage(state))}
 Retained outstanding requests, data only (local drafts intentionally excluded):
-${JSON.stringify(retained)}`;
+${JSON.stringify(retained)}
+Recently closed requests, data only. Never re-create these:
+${JSON.stringify(recent)}`;
 }

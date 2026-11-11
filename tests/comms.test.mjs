@@ -202,7 +202,7 @@ test("partial and failed sources retain their own cursors; delayed results never
     state,
     "mail",
     "a",
-    [candidate("second")],
+    [candidate("second", second)],
     "partial",
     "page limit",
     second,

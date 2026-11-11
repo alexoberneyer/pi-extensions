@@ -24,6 +24,7 @@ import {
   errorMessage,
   needsYouCap,
   oldestDays,
+  rank,
   sources,
   views,
   visibleItems,
@@ -106,15 +107,30 @@ function pad(text: string, width: number): string {
   const clipped = truncateToWidth(text, Math.max(0, width));
   return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 }
-function age(timestamp: string): string {
-  const minutes = Math.max(
-    0,
-    Math.floor((Date.now() - Date.parse(timestamp)) / 60000),
-  );
+function span(ms: number): string {
+  const minutes = Math.max(0, Math.floor(ms / 60000));
   if (minutes < 1) return "now";
   if (minutes < 60) return `${minutes}m`;
   if (minutes < 1440) return `${Math.floor(minutes / 60)}h`;
   return `${Math.floor(minutes / 1440)}d`;
+}
+function age(timestamp: string): string {
+  return span(Date.now() - Date.parse(timestamp));
+}
+// The Updated column shows a deadline instead of the age when there is one.
+function when(item: Item): string {
+  if (!item.dueAt) return age(item.sourceUpdatedAt);
+  const left = Date.parse(item.dueAt) - Date.now();
+  return left < 0 ? `late ${span(-left)}` : `due ${span(left)}`;
+}
+function dueText(item: Item): string {
+  return new Date(item.dueAt!).toLocaleString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 function itemStatus(item: Item): string {
   if (item.draftStale) return "Review draft";
@@ -611,6 +627,9 @@ export class Dashboard implements Component, Focusable {
         item.suggestion || "Review the original before choosing an action.",
         bold,
       ),
+      ...(item.dueAt
+        ? text(`Due ${dueText(item)}`, (line) => th.fg("warning", line))
+        : []),
       ...(item.status === "waiting"
         ? text("Still waiting? Check whether the reply came.", (line) =>
             th.fg("warning", line),
@@ -674,7 +693,7 @@ export class Dashboard implements Component, Focusable {
         "",
         ...text(`Account: ${item.account}`, muted),
         ...text(
-          `Local status: ${itemStatus(item)} · Priority ${item.priority}`,
+          `Local status: ${itemStatus(item)} · Priority ${item.priority}${rank(item) !== item.priority ? ` · ranked ${rank(item)} because it is due soon` : ""}`,
           muted,
         ),
         ...text(`Source updated: ${item.sourceUpdatedAt}`, muted),
@@ -720,7 +739,7 @@ export class Dashboard implements Component, Focusable {
     const title = width - 4 - source - person - status - updated;
     return (
       pad(
-        item ? `${index === this.selection ? "›" : " "}${item.priority}` : " P",
+        item ? `${index === this.selection ? "›" : " "}${rank(item)}` : " P",
         4,
       ) +
       (source ? pad(item ? sourceNames[item.source] : "Source", source) : "") +
@@ -732,9 +751,7 @@ export class Dashboard implements Component, Focusable {
       (status
         ? pad(item ? itemStatus(item) : "Local status", status - 1) + " "
         : "") +
-      (updated
-        ? pad(item ? age(item.sourceUpdatedAt) : "Updated", updated)
-        : "")
+      (updated ? pad(item ? when(item) : "Updated", updated) : "")
     );
   }
   private actionDialog(width: number, height: number): string[] {
@@ -961,7 +978,7 @@ export class Dashboard implements Component, Focusable {
       lines.push(
         index === this.selection
           ? th.bg("selectedBg", th.fg("text", text))
-          : th.fg(item.priority === 1 ? "warning" : "text", text),
+          : th.fg(rank(item) === 1 ? "warning" : "text", text),
       );
     }
     const item = this.item();

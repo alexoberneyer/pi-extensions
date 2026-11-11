@@ -21,6 +21,7 @@ export const decisions = [
   "waiting",
   "snooze",
   "expired",
+  "duplicate",
 ] as const;
 export type Decision = (typeof decisions)[number];
 export const draftOrigins = ["triage", "ai", "manual"] as const;
@@ -42,6 +43,8 @@ export type Candidate = {
   suggestion: string;
   proposedReply?: string;
   priority: number;
+  // A stated deadline, or a meeting start for prep. Never invented.
+  dueAt?: string;
   url?: string;
 };
 export type Resolution = {
@@ -51,6 +54,23 @@ export type Resolution = {
   evidenceAt: string;
   reason: string;
 };
+// Collector input. A saved item is named by its short ref, because long
+// provider IDs get mistyped and a typo silently creates a second item.
+export type CollectedCandidate = Omit<Candidate, "sourceId"> & {
+  sourceId?: string;
+  ref?: string;
+};
+export type CollectedResolution = Omit<
+  Resolution,
+  "sourceId" | "sourceUpdatedAt"
+> & { sourceId?: string; sourceUpdatedAt?: string; ref?: string };
+export type CollectedDuplicate = {
+  ref: string;
+  duplicateOf: string;
+  reason: string;
+};
+// Keys of a saved item to close and the saved item it repeats.
+export type Duplicate = { key: string; of: string; reason: string };
 export type Item = Omit<Candidate, "proposedReply"> & {
   key: string;
   source: Source;
@@ -70,6 +90,8 @@ export type Item = Omit<Candidate, "proposedReply"> & {
   reopenedAt?: string;
   decision?: Decision;
   decidedAt?: string;
+  // Key of the saved item this one repeated when a refresh closed it.
+  duplicateOf?: string;
   // Legacy scratchpad evidence, kept unchanged on old reMarkable items.
   remarkable?: Record<string, unknown>;
 };
@@ -114,6 +136,115 @@ export function identity(
     .update(JSON.stringify([source, account, sourceId]))
     .digest("hex")
     .slice(0, 32);
+}
+export function itemRef(key: string): string {
+  return key.slice(0, 8);
+}
+function byRef(
+  snapshot: State | undefined,
+  ref: unknown,
+  scope?: { source: Source; account: string },
+): Item | undefined {
+  if (!snapshot || typeof ref !== "string" || !/^[a-f0-9]{8}$/.test(ref))
+    return;
+  const matches = snapshot.items.filter(
+    (item) =>
+      itemRef(item.key) === ref &&
+      (!scope ||
+        (item.source === scope.source && item.account === scope.account)),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+export type Collected = {
+  items: Candidate[];
+  resolutions: Resolution[];
+  duplicates: Duplicate[];
+  ignored: number;
+};
+// Turns refs into the saved provider IDs. An unknown ref or an ID the provider
+// never issues is dropped and counted, never guessed into a new item.
+export function applyRefs(
+  source: Source,
+  account: string,
+  snapshot: State | undefined,
+  items: CollectedCandidate[] = [],
+  resolutions: CollectedResolution[] = [],
+  duplicates: CollectedDuplicate[] = [],
+): Collected {
+  if (
+    !Array.isArray(items) ||
+    !Array.isArray(resolutions) ||
+    !Array.isArray(duplicates) ||
+    duplicates.length > 1000
+  )
+    throw new Error("Invalid collection result.");
+  const scope = { source, account };
+  let ignored = 0;
+  const known = <T extends { sourceId?: string; ref?: string }>(
+    value: T,
+  ): (T & { sourceId: string; target?: Item }) | undefined => {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("Invalid collection entry.");
+    const { ref, ...rest } = value;
+    const target = ref === undefined ? undefined : byRef(snapshot, ref, scope);
+    // Graph IDs carry base64 padding only at the end. "=-" marks an edited ID.
+    const edited =
+      source === "mail" &&
+      typeof rest.sourceId === "string" &&
+      /=-/.test(rest.sourceId);
+    if ((ref !== undefined && !target) || (!target && edited)) {
+      ignored++;
+      return;
+    }
+    return (
+      target ? { ...rest, sourceId: target.sourceId, target } : rest
+    ) as T & { sourceId: string; target?: Item };
+  };
+  const mapped: Collected = {
+    items: [],
+    resolutions: [],
+    duplicates: [],
+    ignored: 0,
+  };
+  for (const raw of items) {
+    const item = known(raw);
+    if (!item) continue;
+    const { target: _target, ...candidate } = item;
+    mapped.items.push(candidate as Candidate);
+  }
+  for (const raw of resolutions) {
+    const resolution = known(raw);
+    if (!resolution) continue;
+    const { target, ...rest } = resolution;
+    mapped.resolutions.push({
+      ...rest,
+      // The saved request is the one being closed, whatever was retyped.
+      ...(target ? { sourceUpdatedAt: target.sourceUpdatedAt } : {}),
+    } as Resolution);
+  }
+  for (const raw of duplicates) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      throw new Error("Invalid collection entry.");
+    const target = byRef(snapshot, raw.ref, scope);
+    const of = byRef(snapshot, raw.duplicateOf);
+    if (
+      !target ||
+      !of ||
+      target.key === of.key ||
+      typeof raw.reason !== "string" ||
+      !clean(raw.reason, 300).trim()
+    ) {
+      ignored++;
+      continue;
+    }
+    mapped.duplicates.push({
+      key: target.key,
+      of: of.key,
+      reason: clean(raw.reason, 300).trim(),
+    });
+  }
+  mapped.ignored = ignored;
+  return mapped;
 }
 function validDate(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
@@ -163,6 +294,8 @@ export function validateCandidate(
     throw new Error("Invalid item proposedReply (maximum 20,000 characters).");
   if (![1, 2, 3].includes(value.priority))
     throw new Error("Priority must be 1, 2 or 3.");
+  if (value.dueAt !== undefined && !validDate(value.dueAt))
+    throw new Error("Invalid item dueAt (ISO 8601 date and time).");
   if (
     value.url !== undefined &&
     (typeof value.url !== "string" ||
@@ -187,6 +320,7 @@ export function validateCandidate(
       ? { proposedReply: clean(value.proposedReply, 20000).trim() }
       : {}),
     priority: value.priority,
+    ...(value.dueAt ? { dueAt: new Date(value.dueAt).toISOString() } : {}),
     ...(value.url ? { url: clean(value.url, 4000) } : {}),
   };
 }
@@ -311,6 +445,8 @@ export function validateState(value: State): State {
         (field) => item[field] !== undefined && !validDate(item[field]),
       ) ||
       (item.decision !== undefined && !decisions.includes(item.decision)) ||
+      (item.duplicateOf !== undefined &&
+        !/^[a-f0-9]{32}$/.test(String(item.duplicateOf))) ||
       (item.draftOrigin !== undefined &&
         !draftOrigins.includes(item.draftOrigin))
     )
@@ -367,7 +503,9 @@ export function ingest(
   startedAt: string,
   resolutions: Resolution[] = [],
   snapshot?: State,
+  extra: { duplicates?: Duplicate[]; ignored?: number } = {},
 ): ProposalCounts {
+  const duplicates = extra.duplicates ?? [];
   if (
     !(collectionSources as readonly string[]).includes(source) ||
     !account.trim() ||
@@ -377,7 +515,10 @@ export function ingest(
     items.length > 1000
   )
     throw new Error("Invalid collection result.");
-  if (status === "unavailable" && (items.length || resolutions.length))
+  if (
+    status === "unavailable" &&
+    (items.length || resolutions.length || duplicates.length)
+  )
     throw new Error("Unavailable sources cannot supply items or resolutions.");
   account = clean(account.trim(), 300);
   if (account === "unverified" && status === "complete")
@@ -400,7 +541,10 @@ export function ingest(
   let skippedResolutions = 0;
   // Proposals are transient. Counting them makes a run with no drafts
   // diagnosable: did the collector write none, or did a gate drop them?
-  const counts: ProposalCounts = { proposals: 0, seeded: 0 };
+  const counts: ProposalCounts = emptyCounts();
+  // One result lists distinct requests on purpose. Second IDs appear across
+  // runs, so only items saved before this result can absorb a new ID.
+  const saved = [...state.items];
   for (const resolution of resolved) {
     const key = identity(source, account, resolution.sourceId);
     const current = state.items.find((item) => item.key === key);
@@ -417,12 +561,48 @@ export function ingest(
     current.decidedAt = startedAt;
     delete current.snoozedUntil;
     current.draftRevision++;
+    counts.closed.push(current.title);
+  }
+  // Same rule as a resolution: only an unchanged open request closes, and the
+  // kept item must still exist. A newer message reopens the duplicate.
+  for (const duplicate of duplicates) {
+    const current = state.items.find((item) => item.key === duplicate.key);
+    const expected = snapshot?.items.find((item) => item.key === duplicate.key);
+    if (
+      !current ||
+      !snapshot ||
+      newerCoverage ||
+      current.source !== source ||
+      current.account !== account ||
+      !["open", "waiting"].includes(current.status) ||
+      !isDeepStrictEqual(current, expected) ||
+      !state.items.some((item) => item.key === duplicate.of)
+    ) {
+      skippedResolutions++;
+      continue;
+    }
+    current.status = "dismissed";
+    current.decision = "duplicate";
+    current.decidedAt = startedAt;
+    current.duplicateOf = duplicate.of;
+    delete current.snoozedUntil;
+    delete current.resolution;
+    current.draftRevision++;
+    counts.merged++;
   }
   for (const collected of candidates) {
     // A proposal is transient collector input, never a second saved reply.
     const { proposedReply, ...candidate } = collected;
     if (proposedReply) counts.proposals++;
-    const key = identity(source, account, candidate.sourceId);
+    let key = identity(source, account, candidate.sourceId);
+    if (!state.items.some((item) => item.key === key)) {
+      const same = sameMessage(saved, source, account, candidate);
+      if (same) {
+        candidate.sourceId = same.sourceId;
+        key = same.key;
+        counts.merged++;
+      }
+    }
     const current = state.items.find((item) => item.key === key);
     const expected = snapshot?.items.find((item) => item.key === key);
     // Preserve concurrent local edits/status, but never discard newer provider
@@ -435,6 +615,7 @@ export function ingest(
       ) {
         delete current.uncertainty;
         delete current.blocker;
+        delete current.dueAt;
         Object.assign(current, candidate);
         delete current.resolution;
         current.draftStale = current.draftStale || Boolean(current.draft);
@@ -483,6 +664,7 @@ export function ingest(
     // A refreshed assessment replaces prior notes, including clearing them.
     delete current.uncertainty;
     delete current.blocker;
+    delete current.dueAt;
     Object.assign(current, candidate);
     if (delta > 0) {
       // Newer activity starts a new open cycle on a closed item and ends any
@@ -492,6 +674,7 @@ export function ingest(
       delete current.decision;
       delete current.decidedAt;
       delete current.resolution;
+      delete current.duplicateOf;
       current.status = "open";
       delete current.snoozedUntil;
       current.draftStale = current.draftStale || Boolean(current.draft);
@@ -527,8 +710,12 @@ export function ingest(
         source === "mail" || source === "teams"
           ? `Drafts: ${counts.seeded} of ${counts.proposals} proposals seeded.`
           : "",
+        closedSummary(counts),
         skippedResolutions
-          ? `Skipped ${skippedResolutions} stale resolution(s): queue changed since collection started.`
+          ? `Skipped ${skippedResolutions} stale resolution(s) or duplicate mark(s): queue changed since collection started.`
+          : "",
+        extra.ignored
+          ? `Ignored ${extra.ignored} unknown ref(s) or edited ID(s).`
           : "",
         detail,
       ]
@@ -544,7 +731,63 @@ export function ingest(
   else state.coverage.push(coverage);
   return counts;
 }
-export type ProposalCounts = { proposals: number; seeded: number };
+// The same provider message under a second ID: a moved mail or a retyped ID.
+// Calendar and Notion times are too coarse to identify one message.
+function sameMessage(
+  saved: Item[],
+  source: Source,
+  account: string,
+  candidate: Candidate,
+): Item | undefined {
+  const person = candidate.person.trim().toLowerCase();
+  if ((source !== "mail" && source !== "teams") || !person) return;
+  const matches = saved.filter(
+    (item) =>
+      item.source === source &&
+      item.account === account &&
+      item.sourceUpdatedAt === candidate.sourceUpdatedAt &&
+      item.person.trim().toLowerCase() === person,
+  );
+  return (
+    matches.find((item) => ["open", "waiting"].includes(item.status)) ??
+    matches[0]
+  );
+}
+export type ProposalCounts = {
+  proposals: number;
+  seeded: number;
+  // Second IDs folded into a saved item, and duplicates the collector marked.
+  merged: number;
+  // Titles of requests that someone else's reply closed in this run.
+  closed: string[];
+};
+export const emptyCounts = (): ProposalCounts => ({
+  proposals: 0,
+  seeded: 0,
+  merged: 0,
+  closed: [],
+});
+// One line for the finish notice and source coverage. Wins stay visible.
+export function closedSummary(counts: ProposalCounts): string {
+  const shown = counts.closed
+    .slice(0, 3)
+    .map((title) => truncate(title, 60))
+    .join("; ");
+  const more =
+    counts.closed.length > 3 ? ` and ${counts.closed.length - 3} more` : "";
+  return [
+    counts.closed.length
+      ? `Closed by others: ${counts.closed.length} (${shown}${more}).`
+      : "",
+    counts.merged ? `Merged ${counts.merged} duplicate(s).` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+function truncate(text: string, limit: number): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > limit ? `${line.slice(0, limit - 1)}…` : line;
+}
 export function setDraft(
   state: State,
   key: string,
@@ -585,10 +828,24 @@ export function visibleItems(
     )
     .sort(
       (a, b) =>
-        a.priority - b.priority ||
+        rank(a, now) - rank(b, now) ||
+        // Inside rank 1 the nearest deadline leads. Far dates never jump ahead.
+        (rank(a, now) === 1 ? due(a) - due(b) : 0) ||
         activeSince(a) - activeSince(b) ||
         a.key.localeCompare(b.key),
     );
+}
+// A deadline inside this window counts as priority 1. An item ranked normal
+// days ago rises as its date nears, without waiting for a refresh.
+export const dueSoonMs = 48 * 3600000;
+export function rank(item: Item, now = Date.now()): number {
+  return item.dueAt && Date.parse(item.dueAt) - now <= dueSoonMs
+    ? 1
+    : item.priority;
+}
+// Undated items sort after dated ones within the same rank.
+function due(item: Item): number {
+  return item.dueAt ? Date.parse(item.dueAt) : Number.MAX_SAFE_INTEGER;
 }
 // Start of the current open cycle. sourceUpdatedAt is only a legacy proxy.
 export function activeSince(item: Item): number {

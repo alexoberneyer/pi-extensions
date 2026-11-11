@@ -124,6 +124,15 @@ export function collectedCoverage(state: State): State["coverage"] {
     (collectionSources as readonly string[]).includes(entry.source),
   );
 }
+// Both collectors share these. A retyped or moved provider ID used to create
+// a second item for the same request.
+export const identityRules = `- Every saved item has a ref. Refresh, resolve or reopen a saved item by its ref, never by a retyped provider ID. A newer message on a closed item reopens it through its ref.
+- A request with no ref uses the provider ID exactly as the tool returned it. Never edit, suffix or invent an ID.
+- One source message is at most one item. Several asks in one message go into its summary.
+- When two saved items are the same request, return duplicates with the ref to close, the ref that stays and a short reason. This works across sources: a calendar task block that mirrors a mail or Teams request is a duplicate of that request, not a new item.
+- Never re-create a recently closed item. Return it by ref only when a newer message reopens it.`;
+export const priorityRules = `- Priority 1: it costs me something if ignored until tomorrow. Someone is blocked on me, a window closes, or it gets harder to undo. Anything due before the end of the next working day is priority 1. Priority 2: this week. Priority 3: can wait.
+- dueAt: the deadline stated in the source, or the meeting start for prep, as ISO 8601 with offset. Omit it when no date exists. Never invent one.`;
 export function refreshPrompt(
   runId: string,
   startedAt: string,
@@ -141,13 +150,14 @@ Read the canonical instructions at ${JSON.stringify(file)} for my priorities, no
 - Coverage from prior runs: ${JSON.stringify(collectedCoverage(state))}. For each source AND account, start at its cursor minus two hours. With no cursor use seven days before the upper bound. Keep the old cursor after any partial result or error. Do not discard older retained items. Calendar: inspect now through the end of the next working day in ${JSON.stringify(readConfig().identity.timeZone)}.
 - Page every selected source to completion. If a connector limit, search lag or missing permission makes coverage uncertain, report partial with the reason. Prefer direct Teams conversation reads to the search index. Failed or unavailable sources must be reported, never called empty.
 - Resolve a retained item only when the same request is demonstrably addressed. A later unrelated message is not evidence. My last reply may contain an outstanding promise.
-- In comms_ingest, return resolutions with the original sourceId and sourceUpdatedAt, the stable evidenceId and provider evidenceAt of the reply/completion you actually read, and a short reason why it fully addresses the SAME request with no outstanding promise. Evidence must be at or before the collection upper bound. Partial coverage may resolve individually verified requests in a verified account, but unavailable/unverified sources cannot. An unrelated reply, missing item or an unsent draft is not completion. Never merely omit an answered retained request or record closure only in coverage detail. Do not return the same request in both items and resolutions. Omit resolutions or use [] when none are verified.
-- Read comms_snapshot to cross-check retained items. Identify each request by its stable provider message/task ID, not an invented title or timestamp. Use the real source last-modified time, not poll time. Include the conversation URL when available. Reuse the original request ID when refreshing an existing item. Keep distinct asks separate.
+- In comms_ingest, return resolutions with the request's ref, the stable evidenceId and provider evidenceAt of the reply/completion you actually read, and a short reason why it fully addresses the SAME request with no outstanding promise. Evidence must be at or before the collection upper bound. Partial coverage may resolve individually verified requests in a verified account, but unavailable/unverified sources cannot. An unrelated reply, missing item or an unsent draft is not completion. Never merely omit an answered retained request or record closure only in coverage detail. Do not return the same request in both items and resolutions. Omit resolutions or use [] when none are verified.
+- Read comms_snapshot to cross-check saved items, open and closed. Identify a new request by its stable provider message/task ID, not an invented title or timestamp. Use the real source last-modified time, not poll time. Include the conversation URL when available. Keep distinct asks from different messages separate.
+${identityRules}
 - Call comms_ingest ONCE per source/account with ALL actionable candidates, not just the top three. Up to 1000 per result. Use complete only after all pages and the account identity are verified. Use partial/unavailable otherwise. Never mark unresolved items done based on absence from this window. Keep mail and Teams account identities explicit (email or stable tenant/user ID). For an unavailable source with unknown identity use account "unverified".
-- Priority 1 means needs attention soon, 2 normal, 3 can wait.
+${priorityRules}
 ${triageDraftingInstructions(voice)}
 - Keep summary to the request and verified context. Do not treat a reply not found as proof that no reply was sent. Start suggestion with one immediate action, then put any conditional follow-up in a separate paragraph. Use absolute dates for deadlines rather than stale phrases such as "today or tomorrow".
-Finish with at most three priorities, source failures, and "Open /comms to review". Do not create a Markdown task list or log file.`;
+Finish with at most three priorities, what others closed, source failures, and "Open /comms to review". Do not create a Markdown task list or log file.`;
 }
 export function draftPrompt(item: Item, file: string): string {
   if (!(collectionSources as readonly string[]).includes(item.source))

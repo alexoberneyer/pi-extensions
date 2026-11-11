@@ -471,7 +471,12 @@ test("queue merging re-reads current edits, retains backlog and advances only co
     );
   });
   const rows = parseTriage(
-    payload([result({ items: [item("new")], status: "partial" })]),
+    payload([
+      result({
+        items: [item("new", "2026-10-19T08:30:00.000Z")],
+        status: "partial",
+      }),
+    ]),
     "fixture-run",
     store.read(),
   );
@@ -529,8 +534,6 @@ test("resolution schema requires explicit completion evidence", () => {
   const data = payload([result({ items: [], resolutions: [resolution()] })]);
   assert.equal(Check(triageSchema, data), true);
   for (const changes of [
-    { sourceId: undefined },
-    { sourceUpdatedAt: undefined },
     { evidenceId: undefined },
     { evidenceId: "" },
     { evidenceAt: undefined },
@@ -586,6 +589,8 @@ test("invalid resolutions reject only their source/account before any state chan
     bad({ resolutions: [null] }),
     bad({ resolutions: Array.from({ length: 1001 }, () => resolution()) }),
     ...[
+      { sourceId: undefined },
+      { sourceUpdatedAt: undefined },
       { evidenceId: undefined },
       { evidenceId: "\u001b[31m" },
       { evidenceAt: "invented" },

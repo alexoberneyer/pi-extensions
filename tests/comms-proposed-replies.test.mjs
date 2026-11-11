@@ -401,6 +401,8 @@ test("open-ask uncertainty keeps its proposal, with counts that show what was se
   assert.deepEqual(mergeTriage(state, rows, second, snapshot), {
     proposals: 1,
     seeded: 1,
+    merged: 0,
+    closed: [],
   });
   assert.equal(state.items[0].draft, reply.trim());
   assert.equal(state.items[0].draftOrigin, "triage");

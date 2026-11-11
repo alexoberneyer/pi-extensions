@@ -22,12 +22,16 @@ import {
   type ViewState,
 } from "./dashboard.ts";
 import {
+  applyRefs,
   clean,
+  closedSummary,
   decide,
   demoState,
   disposition,
+  emptyCounts,
   errorMessage,
   ingest,
+  itemRef,
   setDraft,
   collectionSources,
   legacySources,
@@ -35,8 +39,9 @@ import {
   validateCandidates,
   waitingDays,
   type Undo,
-  type Resolution,
-  type Candidate,
+  type CollectedCandidate,
+  type CollectedDuplicate,
+  type CollectedResolution,
   type Coverage,
   type Item,
   type State,
@@ -45,6 +50,7 @@ import { Store } from "./store.ts";
 import { claimTriage, runClaudeTriage } from "./claude-triage.ts";
 import {
   candidateSchema,
+  duplicateSchema,
   resolutionSchema,
   mergeTriage,
 } from "./triage-protocol.ts";
@@ -308,11 +314,14 @@ export default async function comms(pi: ExtensionAPI) {
         job?.kind === "refresh"
           ? {
               ...state,
-              // Collectors see only sources they can refresh.
-              items: state.items.filter(
-                (item) =>
-                  !(legacySources as readonly string[]).includes(item.source),
-              ),
+              // Collectors see only sources they can refresh, each with the
+              // ref they use instead of retyping its provider ID.
+              items: state.items
+                .filter(
+                  (item) =>
+                    !(legacySources as readonly string[]).includes(item.source),
+                )
+                .map((item) => ({ ref: itemRef(item.key), ...item })),
               coverage: collectedCoverage(state),
             }
           : state,
@@ -334,6 +343,9 @@ export default async function comms(pi: ExtensionAPI) {
       items: Type.Array(candidateSchema, { maxItems: 1000 }),
       resolutions: Type.Optional(
         Type.Array(resolutionSchema, { maxItems: 1000 }),
+      ),
+      duplicates: Type.Optional(
+        Type.Array(duplicateSchema, { maxItems: 1000 }),
       ),
     }),
     async execute(_id, args) {
@@ -357,8 +369,16 @@ export default async function comms(pi: ExtensionAPI) {
           "This source/account was already committed for this run.",
         );
       const current = job;
-      const items = validateCandidates(args.items as Candidate[], args.source);
-      let counts = { proposals: 0, seeded: 0 };
+      const collected = applyRefs(
+        args.source,
+        clean(args.account.trim(), 300),
+        current.state,
+        args.items as CollectedCandidate[],
+        args.resolutions as CollectedResolution[] | undefined,
+        args.duplicates as CollectedDuplicate[] | undefined,
+      );
+      const items = validateCandidates(collected.items, args.source);
+      let counts = emptyCounts();
       const state = store().update((state) => {
         counts = ingest(
           state,
@@ -368,8 +388,9 @@ export default async function comms(pi: ExtensionAPI) {
           args.status as Coverage["status"],
           args.detail,
           current.startedAt,
-          args.resolutions as Resolution[] | undefined,
+          collected.resolutions,
           current.state,
+          { duplicates: collected.duplicates, ignored: collected.ignored },
         );
       });
       job.completed.add(key);
@@ -378,6 +399,7 @@ export default async function comms(pi: ExtensionAPI) {
         retained: state.items.length,
         source: args.source,
         status: args.status,
+        ignored: collected.ignored,
         ...counts,
       });
     },
@@ -480,7 +502,7 @@ export default async function comms(pi: ExtensionAPI) {
         if (!active) return;
         // Re-read under the existing atomic store lock. Local drafts/status edits
         // made while Claude collected evidence are never replaced by a snapshot.
-        let counts = { proposals: 0, seeded: 0 };
+        let counts = emptyCounts();
         const latest = queue.update((state) => {
           counts = mergeTriage(state, results, startedAt, requestState);
         });
@@ -490,10 +512,12 @@ export default async function comms(pi: ExtensionAPI) {
         publish(
           `Claude triage finished · ${latest.items.length} retained · ${incomplete} incomplete source/account checks · ${counts.seeded} of ${counts.proposals} reply proposals seeded`,
         );
+        const closed = closedSummary(counts);
         ctx.ui.notify(
-          incomplete
+          (incomplete
             ? `Claude triage finished with ${incomplete} incomplete source/account checks. Open /comms status for details. No replies were sent.`
-            : "Claude triage finished. Open /comms to review. No replies were sent.",
+            : "Claude triage finished. Open /comms to review. No replies were sent.") +
+            (closed ? `\n${closed}` : ""),
           incomplete ? "warning" : "info",
         );
       } catch (error) {

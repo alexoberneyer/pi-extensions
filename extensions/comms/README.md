@@ -35,9 +35,19 @@ Letters act on the selected item. They type into search only after `/`. Next clo
 
 Tab switches between Top and Needs you. Ctrl+G shows coverage. Ctrl+L reloads local state. Ctrl+R starts collection or resets demo fixtures. Escape closes the view. Ctrl+S saves an edited draft.
 
-Needs you lists every item that needs you, by priority, then oldest first. Top shows its first five. Deciding one reveals the next. Search and the source filter apply first. The tabs carry the counts, and the header shows the age of the oldest item. Age runs from the item's latest reopening, then from when Comms first saw it. Items saved before that was recorded use their source time.
+Needs you lists every item that needs you, by rank, then oldest first. Rank is the item's priority, except that anything due within 48 hours counts as priority 1. Within rank 1 the nearest deadline leads. A deadline further out never jumps ahead of older items. The Updated column shows `due 5h` or `late 2d` for an item with a deadline. Top shows its first five. Deciding one reveals the next. Search and the source filter apply first. The tabs carry the counts, and the header shows the age of the oldest item. Age runs from the item's latest reopening, then from when Comms first saw it. Items saved before that was recorded use their source time.
 
 Nothing leaves the queue without a way back. Snooze returns the item tomorrow at 09:00. Waiting returns it after three days as "Still waiting?". A newer message reopens a closed item and ends any deferral. ↺ marks an item that reopened that way. `u` undoes a mistaken decision, unless a refresh or another session changed the item since. So there is no view for closed items.
+
+## Priority and deadlines
+
+Priority 1 means it costs you something if ignored until tomorrow: someone is blocked on you, a window closes, or it gets harder to undo. Priority 2 is this week, priority 3 can wait. Collection sets `dueAt` only from a deadline stated in the source, or from the meeting start when the bundled triage finds something to prepare for the next working day. It never invents one. A refresh without a deadline clears the old one.
+
+## One request, one item
+
+The collector refers to every saved item by an eight-character ref instead of retyping its long provider ID, and recently closed items are part of its input. An unknown ref is ignored and counted, never turned into a new item. A mail or Teams request that arrives under a second ID with the same sender and timestamp as a saved item folds into that item. That covers a mail moved to another folder. The collector can also mark one saved item as a duplicate of another, across sources, for example a calendar task block that repeats a mail. A duplicate closes only while it is unchanged, and a newer message reopens it. Source coverage reports merged duplicates and ignored refs.
+
+The finish notice and source coverage name the requests that someone else's reply closed in that run.
 
 ## Reply-ready triage
 
@@ -71,6 +81,18 @@ Neutral triage and message templates ship in `workflows/comms/`. No private note
 `voiceInstructions` points to an optional private file of writing rules for proposed replies, at most 8 KiB. Both collectors receive it inlined as style guidance. An unreadable or oversized file is reported and drafts use the default voice. Each draft records whether triage, AI or you wrote it. That is provenance only, never evidence that it was sent.
 
 `meetingInstructions`, `remarkableSource` and `notebookName` are still accepted so older configuration files load. Comms no longer uses them. Accepted actions use the configured Reminders list. Calendar windows, snoozes and waiting follow-ups use the configured timezone. Identity labels never replace authenticated-account verification.
+
+## Scheduled refresh
+
+`bin/comms-refresh.mjs` runs one Claude collection outside Pi, with the same read allowlist, triage lock and merge as `/comms refresh`. It needs an installed Pi for its TypeScript loader.
+
+```sh
+node bin/comms-refresh.mjs                # one refresh now
+node bin/comms-refresh.mjs install 07:00  # weekdays, macOS launchd
+node bin/comms-refresh.mjs uninstall
+```
+
+The launchd job runs after wake when the Mac slept through the time. It records the current `claude` and Node locations, so reinstall after moving either. Each run appends one line to `<Pi agent directory>/comms/refresh.log`, including the titles others closed. Exit status 2 means some source/account checks were incomplete. Unattended runs use your Claude usage and send the same evidence to Claude as a manual refresh.
 
 ## Prerequisites
 

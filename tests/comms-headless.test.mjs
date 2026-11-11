@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -39,7 +40,7 @@ const results = ["mail", "teams", "calendar", "notion"].map((source) => ({
       : [],
 }));
 
-function setup(t) {
+function setup(t, rows = results) {
   const dir = mkdtempSync(join(tmpdir(), "comms-headless-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, "bin");
@@ -52,7 +53,7 @@ let input='';
 process.stdin.on('data',chunk=>input+=chunk);
 process.stdin.on('end',()=>{
  const runId=input.match(/Run ID: ([^.\\s]+)/)[1];
- console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,permission_denials:[],structured_output:{runId,results:${JSON.stringify(results)}}}));
+ console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,permission_denials:[],structured_output:{runId,results:${JSON.stringify(rows)}}}));
 });
 `,
     { mode: 0o700 },
@@ -99,4 +100,30 @@ test("bad arguments fail before anything is written", (t) => {
   const { run } = setup(t);
   assert.match(run("install", "7am").stderr, /HH:MM/);
   assert.match(run("schedule").stderr, /Usage/);
+});
+
+test("partial coverage is normal and exits 0", (t) => {
+  const partial = results.map((row) =>
+    row.source === "teams" ? { ...row, status: "partial" } : row,
+  );
+  const { run } = setup(t, partial);
+  const done = run();
+  assert.equal(done.status, 0, done.stderr);
+  assert.match(done.stdout, /1 incomplete source\/account checks/);
+});
+
+test("install refuses a linked worktree before touching launchd", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "comms-worktree-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "bin"));
+  copyFileSync(script, join(dir, "bin", "comms-refresh.mjs"));
+  writeFileSync(join(dir, ".git"), "gitdir: /example/main/.git/worktrees/x\n");
+  // No node or claude on PATH: a broken check fails here, never in launchd.
+  const refused = spawnSync(
+    process.execPath,
+    [join(dir, "bin", "comms-refresh.mjs"), "install", "07:00"],
+    { encoding: "utf8", env: { ...process.env, PATH: "/usr/bin:/bin" } },
+  );
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /not from a linked git worktree/);
 });

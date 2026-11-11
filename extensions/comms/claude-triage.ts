@@ -23,7 +23,7 @@ const guard = realpathSync(
   fileURLToPath(new URL("./triage-guard.mjs", import.meta.url)),
 );
 const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
-export function claudeArgs(): string[] {
+export function claudeArgs(model = "sonnet"): string[] {
   return [
     "--print",
     "--verbose",
@@ -40,7 +40,7 @@ export function claudeArgs(): string[] {
     "--disable-slash-commands",
     "--no-session-persistence",
     "--model",
-    "sonnet",
+    model,
     "--effort",
     "high",
     "--max-turns",
@@ -109,6 +109,8 @@ export type ClaudeRequest = {
   voice?: string;
   signal: AbortSignal;
   progress: (text: string) => void;
+  // The scheduled run uses a stronger model. Manual refreshes stay fast.
+  model?: string;
 };
 export async function runClaudeTriage(
   request: ClaudeRequest,
@@ -128,7 +130,7 @@ export async function runClaudeTriage(
   // The user's Claude auth/MCP settings stay in Claude. No credential copying,
   // second MCP client, shell prompt interpolation or permissions bypass.
   return new Promise((resolve, reject) => {
-    const child = spawn("claude", claudeArgs(), {
+    const child = spawn("claude", claudeArgs(request.model), {
       cwd: request.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],

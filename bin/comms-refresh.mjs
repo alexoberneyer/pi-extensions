@@ -12,6 +12,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -83,11 +84,20 @@ async function install(time) {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time || "");
   if (!match) throw new Error("Give a time as HH:MM, for example 07:00.");
   const [hour, minute] = [Number(match[1]), Number(match[2])];
+  // The job keeps this script's path. A linked worktree is temporary.
+  if (statSync(join(root, ".git"), { throwIfNoEntry: false })?.isFile())
+    throw new Error(
+      "Install from the main checkout, not from a linked git worktree.",
+    );
+  const script = fileURLToPath(import.meta.url);
+  // The PATH entry, not process.execPath: that names a versioned Homebrew
+  // directory that the next upgrade deletes.
+  const node = which("node");
   const log = join(await agentDir(piPackage()), "comms", "refresh.log");
   mkdirSync(dirname(log), { recursive: true, mode: 0o700 });
   // launchd starts with a bare PATH. Claude and Node must be found as now.
   const path = [
-    ...new Set([dirname(which("claude")), dirname(process.execPath)]),
+    ...new Set([dirname(which("claude")), dirname(node)]),
     "/usr/bin",
     "/bin",
     "/usr/sbin",
@@ -103,7 +113,7 @@ async function install(time) {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>${label}</string>
-  <key>ProgramArguments</key><array><string>${xml(process.execPath)}</string><string>${xml(fileURLToPath(import.meta.url))}</string></array>
+  <key>ProgramArguments</key><array><string>${xml(node)}</string><string>${xml(script)}</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(path)}</string></dict>
   <key>StartCalendarInterval</key><array>${days}</array>
   <key>StandardOutPath</key><string>${xml(log)}</string>
@@ -125,7 +135,7 @@ async function install(time) {
     /* Not loaded yet. */
   }
   execFileSync("/bin/launchctl", ["bootstrap", domain, plist]);
-  return `Comms refresh scheduled on weekdays at ${time}. Log: ${log}. Remove with: comms-refresh.mjs uninstall`;
+  return `Comms refresh scheduled on weekdays at ${time}.\nRuns: ${node} ${script}\nLog: ${log}\nRemove with: comms-refresh.mjs uninstall`;
 }
 function uninstall() {
   try {
@@ -170,9 +180,8 @@ try {
   if (command === "install") console.log(await install(argument));
   else if (command === "uninstall") console.log(uninstall());
   else if (command === undefined) {
-    const { line, complete } = await refresh();
-    console.log(`${stamp()} ${line}`);
-    if (!complete) process.exitCode = 2;
+    // Partial coverage is normal (the Teams index lags). Only failures exit 1.
+    console.log(`${stamp()} ${await refresh()}`);
   } else
     throw new Error("Usage: comms-refresh.mjs [install HH:MM | uninstall]");
 } catch (error) {

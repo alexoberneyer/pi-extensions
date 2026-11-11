@@ -13,7 +13,7 @@ import { canonical, notesDirectory, voiceInstructions } from "./workflow.ts";
 export async function refreshOnce(
   agentDir: string,
   signal: AbortSignal,
-): Promise<{ line: string; complete: boolean }> {
+): Promise<string> {
   const queue = new Store(join(agentDir, "comms"));
   const state = queue.read();
   const instructions = readFileSync(canonical("triage"), "utf8");
@@ -30,6 +30,7 @@ export async function refreshOnce(
       voice: voice.text,
       signal,
       progress: () => {},
+      model: "opus",
     });
     signal.throwIfAborted();
     let counts = emptyCounts();
@@ -39,16 +40,13 @@ export async function refreshOnce(
     const incomplete = results.filter(
       (row) => row.status !== "complete",
     ).length;
-    return {
-      complete: !incomplete,
-      line: [
-        voice.warning,
-        `Comms refresh finished · ${latest.items.length} retained · ${incomplete} incomplete source/account checks · ${counts.seeded} of ${counts.proposals} reply proposals seeded.`,
-        closedSummary(counts),
-      ]
-        .filter(Boolean)
-        .join(" "),
-    };
+    return [
+      voice.warning,
+      `Comms refresh finished · ${latest.items.length} retained · ${incomplete} incomplete source/account checks · ${counts.seeded} of ${counts.proposals} reply proposals seeded.`,
+      closedSummary(counts),
+    ]
+      .filter(Boolean)
+      .join(" ");
   } finally {
     release();
   }

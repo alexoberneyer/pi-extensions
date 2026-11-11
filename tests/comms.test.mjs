@@ -873,6 +873,15 @@ test("source filtering, search and detail navigation preserve selection", () => 
   assert.equal(h.choice(), "closed");
 });
 
+test("the health line says when sources were last checked", () => {
+  const now = new Date().toISOString();
+  const fresh = dashboard(demoState(now));
+  assert.match(screen(fresh.view), /Checked just now · /);
+  // A morning refresh that failed leaves the newest check older than a day.
+  const stale = dashboard(demoState(first));
+  assert.match(screen(stale.view), /Checked \d+d ago · /);
+});
+
 test("coverage failures remain visible and every account has scrollable evidence", () => {
   const state = demoState(first);
   ingest(

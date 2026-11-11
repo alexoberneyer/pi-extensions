@@ -117,6 +117,8 @@ function span(ms: number): string {
 function age(timestamp: string): string {
   return span(Date.now() - Date.parse(timestamp));
 }
+// Older than a day means the morning refresh did not run or failed.
+const staleMs = 24 * 3600000;
 // The Updated column shows a deadline instead of the age when there is one.
 function when(item: Item): string {
   if (!item.dueAt) return age(item.sourceUpdatedAt);
@@ -582,24 +584,35 @@ export class Dashboard implements Component, Focusable {
     this.tui.requestRender();
   }
 
-  private coverage(): { text: string; incomplete: boolean } {
+  private coverage(): { text: string; warn: boolean } {
     const counts = { unchecked: 0, partial: 0, unavailable: 0 };
+    let newest = 0;
     for (const source of collectionSources) {
       const entries = this.data.state.coverage.filter(
         (entry) => entry.source === source,
       );
       if (!entries.length) counts.unchecked++;
-      for (const entry of entries)
+      for (const entry of entries) {
         if (entry.status !== "complete") counts[entry.status]++;
+        newest = Math.max(newest, Date.parse(entry.checkedAt));
+      }
     }
     const failures = Object.entries(counts)
       .filter(([, count]) => count)
       .map(([status, count]) => `${count} ${status}`);
+    // A failed scheduled refresh shows here, where you already look.
+    const stale = Boolean(newest) && Date.now() - newest > staleMs;
+    const ago = newest ? span(Date.now() - newest) : "";
+    const checked = !ago
+      ? ""
+      : ago === "now"
+        ? "Checked just now · "
+        : `Checked ${ago} ago · `;
     return {
-      incomplete: failures.length > 0,
+      warn: failures.length > 0 || stale,
       text: failures.length
-        ? `Coverage incomplete · ${failures.join(" · ")} · ^G details`
-        : "Last checks reported complete · ^G coverage",
+        ? `${checked}Coverage incomplete · ${failures.join(" · ")} · ^G details`
+        : `${checked}Last checks reported complete · ^G coverage`,
     };
   }
   private detailLines(item: Item, width: number): string[] {
@@ -831,10 +844,7 @@ export class Dashboard implements Component, Focusable {
         "dim",
         ` · ${this.source ? sourceNames[this.source] : "All sources"} · ${this.summary()}`,
       );
-    const healthLine = th.fg(
-      health.incomplete ? "warning" : "dim",
-      health.text,
-    );
+    const healthLine = th.fg(health.warn ? "warning" : "dim", health.text);
     if (!this.usable)
       return this.frame(
         [

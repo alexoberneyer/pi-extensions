@@ -92,7 +92,7 @@ node bin/comms-refresh.mjs install 07:00  # weekdays, macOS launchd
 node bin/comms-refresh.mjs uninstall
 ```
 
-The launchd job runs after wake when the Mac slept through the time. It records the current `claude` and Node locations, so reinstall after moving either. Each run appends one line to `<Pi agent directory>/comms/refresh.log`, including the titles others closed. Exit status 2 means some source/account checks were incomplete. Unattended runs use your Claude usage and send the same evidence to Claude as a manual refresh.
+The launchd job runs after wake when the Mac slept through the time, and not at all while it is shut down. Install it from the main checkout: it keeps the script path it was installed from, and it refuses a linked git worktree. It records `claude` and `node` as found on PATH, so a Homebrew upgrade does not break it. Each run uses Opus and appends one line to `<Pi agent directory>/comms/refresh.log`, including the titles others closed. Only failures exit with status 1. The queue header shows when sources were last checked and turns to a warning after a day, so a failed morning run shows where you look. Unattended runs use your Claude usage and send the same evidence to Claude as a manual refresh.
 
 ## Prerequisites
 

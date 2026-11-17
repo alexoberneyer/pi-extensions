@@ -10,24 +10,25 @@ interrupting Pi. Ctrl+S saves, Enter inserts a newline, and nothing is sent.
 
 ## Keys
 
-| Key in NORMAL             | Action                                                |
-| ------------------------- | ----------------------------------------------------- |
-| `i` / `a`                 | Insert before / after the current character           |
-| `I` / `A`                 | Insert at the first nonblank / end of the line        |
-| `h` / `l`                 | Previous / next character, within the line            |
-| `j` / `k`                 | Next / previous logical line, never prompt history    |
-| `w` / `b` / `e`           | Next word start / previous word start / word end      |
-| `0` / `$`                 | First / last character on the line                    |
-| `f` / `F` + character     | Next / previous match on the line                     |
-| `t` / `T` + character     | Just before / just after that match                   |
-| `;` / `,`                 | Repeat the last search / in the other direction       |
-| `x`                       | Delete the character under the cursor                 |
-| `u`                       | Undo the last edit                                    |
-| `Ctrl+R`                  | Redo the last undone edit                             |
-| `c{motion}` / `d{motion}` | Change / delete with any motion above but `j/k`       |
-| `cc` / `dd`               | Change the line with indentation / delete the line    |
-| `C` / `D`                 | Change / delete to the end of the line                |
-| `{count}{command}`        | Repeat any command above but `i/a/I/A`, such as `10w` |
+| Key in NORMAL             | Action                                              |
+| ------------------------- | --------------------------------------------------- |
+| `i` / `a`                 | Insert before / after the current character         |
+| `I` / `A`                 | Insert at the first nonblank / end of the line      |
+| `o` / `O`                 | Open a blank line below / above and enter INSERT    |
+| `h` / `l`                 | Previous / next character, within the line          |
+| `j` / `k`                 | Next / previous logical line, never prompt history  |
+| `w` / `b` / `e`           | Next word start / previous word start / word end    |
+| `0` / `$`                 | First / last character on the line                  |
+| `f` / `F` + character     | Next / previous match on the line                   |
+| `t` / `T` + character     | Just before / just after that match                 |
+| `;` / `,`                 | Repeat the last search / in the other direction     |
+| `x`                       | Delete the character under the cursor               |
+| `u`                       | Undo the last edit                                  |
+| `Ctrl+R`                  | Redo the last undone edit                           |
+| `c{motion}` / `d{motion}` | Change / delete with any motion above but `j/k`     |
+| `cc` / `dd`               | Change the line with indentation / delete the line  |
+| `C` / `D`                 | Change / delete to the end of the line              |
+| `{count}{command}`        | Repeat commands except `i/a/I/A/o/O`, such as `10w` |
 
 A pending count, `c`, `d`, `f`, `F`, `t` or `T` appears in the border, such
 as `2dt`. The motion selects the range. Changes enter INSERT. Deletions stay in NORMAL.
@@ -43,7 +44,8 @@ a combining accent). Here the character stays whole.
 Counts before and after an operator multiply, so `2d3w` deletes six words.
 `0` moves to the line start until a count has begun, as in `10w`. Counts stop at
 the ends of the prompt, but `2dd`, `2D` and `3$` on the last line do nothing, as
-in Vim. Counts on `i/a/I/A` are ignored instead of repeating the inserted text.
+in Vim. Counts on `i/a/I/A/o/O` are ignored instead of repeating the inserted text.
+`o/O` open an empty logical line at column zero, without copying indentation.
 
 Escape cancels a pending count, operator or search without interrupting Pi.
 Unsupported suffixes, native shortcuts and pastes also cancel it. A second
@@ -61,6 +63,7 @@ Characters include emoji and combining marks. Collapsed paste markers stay
 atomic, including when deleted and undone.
 
 Each change and its replacement text through Escape form one undo step.
+`o/O` group the new line and all text entered through Escape into one step.
 Each deletion is one step. Plain INSERT typing keeps Pi's native grouping.
 Deleting text does not write to the clipboard or a Vim register.
 

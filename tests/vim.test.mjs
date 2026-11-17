@@ -308,6 +308,107 @@ test("i/a/I/A enter INSERT at their Vim positions", async () => {
   assert.equal(editor.getText(), "  X ");
 });
 
+test("o/O open a blank logical line below/above and enter INSERT without submitting", async () => {
+  const { editor } = await harness();
+  const submissions = [];
+  editor.onSubmit = (text) => submissions.push(text);
+  for (const lines of [
+    [""],
+    ["  abc"],
+    ["\t  abc"],
+    ["before", "middle", "after"],
+    ["", "  ", ""],
+    ["界👨‍👩‍👧‍👦e\u0301z", "next"],
+    ["a".repeat(150), "tail"],
+  ]) {
+    for (const [line, text] of lines.entries()) {
+      for (const col of [0, text.length ? text.length - 1 : 0]) {
+        for (const key of ["o", "O"]) {
+          normalAt(editor, lines, line, col);
+          editor.render(20);
+          const inserted = line + (key === "o" ? 1 : 0);
+          const expected = [...editor.getLines()];
+          expected.splice(inserted, 0, "");
+          const changes = [];
+          editor.onChange = (text) => changes.push(text);
+          editor.handleInput(key);
+          assert.deepEqual(editor.getLines(), expected, key);
+          assert.deepEqual(editor.getCursor(), { line: inserted, col: 0 });
+          assertMode(editor, "INSERT");
+          assert.deepEqual(changes, [expected.join("\n")]);
+          keys(editor, "new text");
+          expected[inserted] = "new text";
+          assert.deepEqual(editor.getLines(), expected, key);
+          editor.onChange = undefined;
+        }
+      }
+    }
+  }
+  assert.deepEqual(submissions, []);
+});
+
+test("o/O and inserted text undo and redo together, including collapsed pastes", async () => {
+  const { editor } = await harness();
+  const lines = ["before", "  original", "after"];
+  const content = Array.from({ length: 15 }, (_, i) => `line ${i}`).join("\n");
+  for (const key of ["o", "O"]) {
+    for (const text of ["", "new text"]) {
+      normalAt(editor, lines, 1, 4);
+      editor.handleInput(key);
+      keys(editor, text);
+      if (text) editor.handleInput(paste(content));
+      editor.handleInput(esc);
+      const after = editor.getText();
+      const expanded = editor.getExpandedText();
+      const cursor = editor.getCursor();
+      const expected = [...lines];
+      expected.splice(key === "o" ? 2 : 1, 0, text ? text + content : "");
+      assert.equal(expanded, expected.join("\n"));
+      editor.handleInput("u");
+      assert.equal(editor.getText(), lines.join("\n"), key);
+      assert.deepEqual(editor.getCursor(), { line: 1, col: 4 });
+      editor.handleInput("\x12");
+      assert.equal(editor.getText(), after, key);
+      assert.equal(editor.getExpandedText(), expanded, key);
+      assert.deepEqual(editor.getCursor(), cursor);
+      assertMode(editor, "NORMAL");
+    }
+  }
+  normalAt(editor, ["first"]);
+  keys(editor, "osecond");
+  editor.handleInput(esc);
+  keys(editor, "Othird");
+  editor.handleInput(esc);
+  assert.equal(editor.getText(), "first\nthird\nsecond");
+  editor.handleInput("u");
+  assert.equal(editor.getText(), "first\nsecond");
+  editor.handleInput("u");
+  assert.equal(editor.getText(), "first");
+});
+
+test("o/O decode terminal text and ignore insert counts and remapped newline bindings", async () => {
+  const { editor } = await harness({
+    config: { "tui.input.newLine": "ctrl+n" },
+  });
+  for (const [data, line] of [
+    ["o", 1],
+    ["O", 0],
+    ["\x1b[111u", 1],
+    ["\x1b[111:79;2u", 0],
+    ["\x1b[27;1;111~", 1],
+    ["\x1b[27;2;79~", 0],
+  ]) {
+    normalAt(editor, ["original"], 0, 3);
+    keys(editor, "99999999999");
+    editor.handleInput(data);
+    assert.deepEqual(editor.getCursor(), { line, col: 0 });
+    assertMode(editor, "INSERT");
+    keys(editor, "X");
+    editor.handleInput(esc);
+    assert.equal(editor.getText(), line ? "original\nX" : "X\noriginal");
+  }
+});
+
 test("w/b/e separate punctuation, cross lines and handle blank lines", async () => {
   const { editor } = await harness();
   normalAt(editor, ["foo.bar  baz", "next", "", "last"]);
@@ -667,7 +768,19 @@ test("c/d wait for a motion, show it in the border, and Escape cancels without i
 
 test("unsupported operator suffixes and native shortcuts cancel instead of deleting", async () => {
   const { editor } = await harness();
-  for (const command of ["cj", "dk", "ci", "da", "dx", "cd", "dc"]) {
+  for (const command of [
+    "cj",
+    "dk",
+    "ci",
+    "da",
+    "dx",
+    "cd",
+    "dc",
+    "co",
+    "cO",
+    "do",
+    "dO",
+  ]) {
     normalAt(editor, ["alpha beta"]);
     keys(editor, command);
     assert.equal(editor.getText(), "alpha beta", command);
@@ -1063,6 +1176,10 @@ test("new native or Vim edits discard redo, including same-text programmatic res
   const edits = [
     () => keys(editor, "lx"),
     () => keys(editor, "dw"),
+    ...["o", "O"].map((key) => () => {
+      editor.handleInput(key);
+      editor.handleInput(esc);
+    }),
     () => {
       keys(editor, "cwNEW");
       editor.handleInput(esc);
@@ -1237,7 +1354,7 @@ test("adapter installation is idempotent and callback edits invalidate redo", as
   assert.equal(editor.getText(), afterRedoCallback);
 });
 
-test("change/delete ranges and resulting cursors match clean Neovim", async (t) => {
+test("change/delete/open-line results and cursors match clean Neovim", async (t) => {
   if (spawnSync("nvim", ["--version"], { encoding: "utf8" }).status !== 0) {
     t.skip("Neovim is not installed");
     return;
@@ -1277,6 +1394,8 @@ test("change/delete ranges and resulting cursors match clean Neovim", async (t) 
           "d$",
           "dd",
           "D",
+          // Pi opens blank lines without Neovim's default autoindent.
+          ...(/^[ \t]/.test(text) ? [] : ["o", "O"]),
         ]) {
           cases.push({
             lines,
@@ -1284,7 +1403,9 @@ test("change/delete ranges and resulting cursors match clean Neovim", async (t) 
             col,
             keys:
               command +
-              (command.startsWith("c") || command === "C" ? "X\x1b" : ""),
+              (command.startsWith("c") || ["C", "o", "O"].includes(command)
+                ? "X\x1b"
+                : ""),
           });
         }
       }
@@ -1313,12 +1434,12 @@ test("change/delete ranges and resulting cursors match clean Neovim", async (t) 
     0,
     JSON.stringify(failures.slice(0, 12), null, 2),
   );
-  t.diagnostic(`${cases.length} operator cases match clean Neovim.`);
+  t.diagnostic(`${cases.length} operator/open-line cases match clean Neovim.`);
 });
 
 for (const tuiMode of ["regular", "fullscreen"]) {
   test(
-    `real Pi PTY ${tuiMode} changes, deletes, undoes, redoes and reloads the Vim editor`,
+    `real Pi PTY ${tuiMode} changes, deletes, opens lines, undoes, redoes and reloads the Vim editor`,
     {
       skip:
         process.platform === "win32" ||
@@ -1402,6 +1523,24 @@ try:
     send(b'd')
     wait_for(b'NORMAL')
     send(b'u')
+    wait_for(b'gain')
+    send(b'oBELOW')
+    wait_for(b'BELOW')
+    wait_for(b'INSERT')
+    send(b'\\x1b')
+    wait_for(b'NORMAL')
+    send(b'OABOVE')
+    wait_for(b'ABOVE')
+    wait_for(b'INSERT')
+    send(b'\\x1b')
+    wait_for(b'NORMAL')
+    send(b'uu')
+    wait_for(b'gain')
+    send(b'\\x12')
+    wait_for(b'BELOW')
+    send(b'\\x12')
+    wait_for(b'ABOVE')
+    send(b'uu')
     wait_for(b'gain')
     send(b'\\x01\\x0b')
     wait_for(b'INSERT')

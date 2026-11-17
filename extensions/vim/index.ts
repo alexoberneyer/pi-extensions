@@ -280,7 +280,7 @@ export class VimEditor extends CustomEditor {
       return;
     }
     this.verticalColumn = undefined;
-    // Counts on i, a, I and A are ignored instead of repeating the insert.
+    // Counts on insert commands are ignored instead of repeating the insert.
     switch (key) {
       case "i":
         this.mode = "insert";
@@ -307,6 +307,26 @@ export class VimEditor extends CustomEditor {
         this.move({ ...cursor, col: this.getLines()[cursor.line].length });
         this.mode = "insert";
         break;
+      case "o":
+      case "O": {
+        const lines = this.getLines();
+        const below = key === "o";
+        const offset =
+          lines
+            .slice(0, cursor.line)
+            .reduce((sum, line) => sum + line.length + 1, 0) +
+          (below ? lines[cursor.line].length : 0);
+        const depth = this.port.undoDepth();
+        this.port.replace({
+          from: offset,
+          to: offset,
+          text: "\n",
+          cursor: { line: cursor.line + (below ? 1 : 0), col: 0 },
+        });
+        this.mode = "insert";
+        this.changeDepth = depth;
+        break;
+      }
       case "h":
         this.move({
           ...cursor,

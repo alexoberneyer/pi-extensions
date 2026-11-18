@@ -53,3 +53,9 @@ Verified locally with Pi 1.5.0, Node 26.8.1 and Prettier 3.8.1:
 - Formatting and the release-content checks pass.
 
 Real connectors, production services, desktop applications and model calls were not exercised. Live settings and existing extension links were not switched. See [performance](performance.md) for the bounded model-free load comparison.
+
+## Local voice verification
+
+Voice is exercised against Pi 1.5.2. Its automated suites use synthetic data and fake capture/model adapters. PTY tests run real Pi in regular and fullscreen modes to verify Vim-safe literal insertion, undo, Space-tap redraw and reload without microphone access.
+
+A separate local check transcribed synthetic English and German speech with the cached Parakeet model. The actual offline worker also reached ready and its process group shut down without starting capture. These checks do not establish real-microphone accuracy or terminal-specific physical hold/release behavior. Those remain explicit manual checks in the [Voice instructions](../extensions/voice/README.md#verification).

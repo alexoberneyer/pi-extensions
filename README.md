@@ -1,6 +1,6 @@
 # Pi extensions
 
-Ten extensions for [Pi](https://github.com/earendil-works/pi). One package, with optional local integrations. Tested against Pi 1.5.0 and Node 26.8.1. Pi requires Node 22.19.0 or newer. Other Pi versions are not yet verified.
+Eleven extensions for [Pi](https://github.com/earendil-works/pi). One package, with optional local integrations. Voice is exercised against Pi 1.5.2. The original ten-extension extraction was checked with Pi 1.5.0 and Node 26.8.1. Pi requires Node 22.19.0 or newer. Other Pi versions are not assumed compatible.
 
 ![Agents dashboard with Pi and Claude Code sessions across three projects, shown with demo data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/agents-demo.gif)
 
@@ -52,6 +52,7 @@ Do not load this package alongside older copies of the same extensions. See [mig
 | [Vim](extensions/vim/README.md)                 | Vim motions, operators and undo/redo in the prompt | Interactive editor only                          |
 | [Web](extensions/web/README.md)                 | Brave search and public-page extraction            | Tools available, no requests until called        |
 | [Fast](extensions/fast/README.md)               | Supported-provider speed tiers                     | Off for new sessions                             |
+| [Voice](extensions/voice/README.md)             | Local microphone dictation into the prompt         | Off until `/voice`, enabling warms only          |
 | [Agents](extensions/agents/README.md)           | Pi, Claude, Codex and tmux dashboard               | Local Pi presence, discovery only while browsing |
 | [dev01](extensions/dev01/README.md)             | Explicit remote jobs and file transfers            | Disabled without a configured SSH host           |
 | [Approval](extensions/approval/README.md)       | Confirmation and plan-mode workflow guards         | Generic guards active                            |
@@ -79,6 +80,7 @@ See [configuration](docs/configuration.md) for optional integrations and [perfor
 3. **Remote work:** SSH, Bash, tmux and the selected agent must already work on the configured host. Transfers require rsync with `--protect-args`.
 4. **Desktop sources:** Apple Reminders needs macOS Automation permission. reMarkable uses a configured desktop copy and optional Python dependencies. Unsupported desktop features stay unavailable on other systems.
 5. **Web and Comms:** Brave needs your own key. Web extraction uses `uvx`. Comms uses your existing Claude or Pi connectors, not shared credentials or an included Microsoft 365 connection.
+6. **Voice (optional):** macOS arm64 in a local interactive terminal, outside SSH. Requires existing `ffmpeg` and `uv`, cached Python 3.10, `mlx-audio==0.5.3` and the Parakeet model. [Set up the offline cache explicitly](extensions/voice/README.md#one-time-setup). Enabling `/voice` only warms the model. Recording is separate. Local speech recognition does not make Pi's provider or history local.
 
 Use scoped credentials and actual isolation for untrusted or unattended work. Approval patterns, tool annotations, project trust and task scopes do not restrict operating-system access. Worker processes inherit much of the environment and share their selected working directory.
 

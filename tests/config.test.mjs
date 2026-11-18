@@ -308,6 +308,60 @@ test("configured local paths expand relative to the private config directory, no
   assert.throws(() => readConfig(), /XDG_CONFIG_HOME must be absolute/);
 });
 
+test("voice settings keep unsafe shortcuts and device arguments out", (t) => {
+  const { path, write } = fixture(t);
+  assert.deepEqual(readConfig().voice, {
+    shortcut: "ctrl+space",
+    cancelShortcut: "ctrl+alt+x",
+    mode: "hold",
+    space: false,
+    device: ":default",
+  });
+  for (const key of ["shortcut", "cancelShortcut"]) {
+    for (const value of [
+      "escape",
+      "ctrl+c",
+      "alt+l",
+      "space",
+      "ctrl+shift+m",
+    ]) {
+      write({ voice: { [key]: value } });
+      assert.throws(() => readConfig(path), /ctrl\+alt\+letter shortcut/);
+    }
+  }
+  write({ voice: { shortcut: "ctrl+space" } });
+  assert.equal(readConfig(path).voice.shortcut, "ctrl+space");
+  assert.equal(readConfig(path).voice.cancelShortcut, "ctrl+alt+x");
+  write({ voice: { shortcut: "ctrl+alt+v" } });
+  assert.equal(readConfig(path).voice.shortcut, "ctrl+alt+v");
+  write({ voice: { cancelShortcut: "ctrl+space" } });
+  assert.throws(() => readConfig(path), /voice.cancelShortcut/);
+  for (const voice of [
+    { mode: "automatic" },
+    { device: "-option" },
+    { device: ":default -option" },
+    { device: "0:0" },
+    { shortcut: "ctrl+alt+x", cancelShortcut: "ctrl+alt+x" },
+  ]) {
+    write({ voice });
+    assert.throws(
+      () => readConfig(path),
+      /voice.mode|voice.device|shortcuts must differ/,
+    );
+  }
+  write({
+    voice: {
+      mode: "toggle",
+      space: true,
+      device: ":2",
+      shortcut: "ctrl+alt+b",
+    },
+  });
+  assert.equal(readConfig(path).voice.device, ":2");
+  assert.equal(readConfig(path).voice.space, true);
+  assert.equal(readConfig(path).voice.mode, "toggle");
+});
+
 test("prototype keys cannot pollute defaults or returned configuration", (t) => {
   const { path } = fixture(t);
   const before = structuredClone(defaults);

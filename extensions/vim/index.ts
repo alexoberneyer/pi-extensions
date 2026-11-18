@@ -94,6 +94,17 @@ export class VimEditor extends CustomEditor {
     return this.port !== undefined;
   }
 
+  /** Other input integrations must not steal a find target or NORMAL command. */
+  get acceptsLiteralSpace(): boolean {
+    return (
+      this.supported &&
+      this.mode === "insert" &&
+      !this.pasting &&
+      !this.port!.jumpPending() &&
+      !this.isShowingAutocomplete()
+    );
+  }
+
   readonly inputListener = (data: string) => {
     this.observeInput(data);
     return undefined;

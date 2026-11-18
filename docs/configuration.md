@@ -54,6 +54,36 @@ Remote targets retain their actual SSH destination alongside the legacy target m
 
 The public default is `off`. `priority` deliberately increases usage or charges. Ultrafast is never an allowed configuration default. Request it explicitly with `/fast ultra` after reviewing the warning. Saved session-branch choices take precedence over the default, including older saved Ultra choices.
 
+## Local voice
+
+```json
+{
+  "voice": {
+    "shortcut": "ctrl+space",
+    "cancelShortcut": "ctrl+alt+x",
+    "mode": "hold",
+    "space": false,
+    "device": ":default"
+  }
+}
+```
+
+These are the defaults. There is no persisted `enabled` setting. Voice starts off in each new or reloaded session. `/voice` toggles it, and `/voice on` enables and warms the model without opening the microphone. Once ready, use the recording shortcut or `/voice start` to capture. `/voice start` from off only enables and warms.
+
+`shortcut` accepts `ctrl+space` or a lowercase `ctrl+alt+letter` binding. `cancelShortcut` remains a lowercase `ctrl+alt+letter` binding. They must differ. macOS can reserve Ctrl+Space for switching input sources. Disable that system binding or choose a supported alternative if it is active. Activation checks Pi's resolved keybindings, not operating-system or other application shortcuts. Option+Space remains available to Handy. Escape and Ctrl+C keep their normal behavior. The cancel shortcut discards only dictation, not the typed draft or Pi's running agent.
+
+`mode` accepts `hold` or `toggle`. Hold uses Kitty key-release reporting where available. Otherwise short presses toggle recording. The first shortcut press while off only enables Voice. Release finalizes a held recording. A second press finalizes a toggled recording. `/voice stop` works for either. Voice never auto-submits. Enter normally submits the existing draft and retires active dictation.
+
+`space` is an opt-in 300 ms hold gesture requiring Kitty release reporting. Short taps type ordinary spaces. The bundled Vim editor permits it only for literal Space in INSERT, not NORMAL commands such as `f` followed by Space. Pi's stock editor is supported. Other custom editors need an explicit `acceptsLiteralSpace` boolean getter. `/voice space on` and `/voice space off` override the setting for the current session, without enabling capture. Reload or session replacement restores the configured value.
+
+`device` accepts AVFoundation `:default` or a colon followed by an audio device number, such as `:0`. Voice does not enumerate devices automatically. The [Voice device diagnostic](../extensions/voice/README.md#configuration-and-microphone-device) is explicitly user-triggered and can request microphone permission. Grant permission to the terminal through macOS privacy settings. Never bypass those controls.
+
+Voice requires macOS arm64, interactive Pi outside SSH, existing `ffmpeg` and `uv`, and cached Python 3.10, `mlx-audio==0.5.3` and `mlx-community/parakeet-tdt-0.6b-v3`. [Run the explicit one-time setup](../extensions/voice/README.md#one-time-setup) to download and cache dependencies and the model as needed. Runtime forces `--offline` and `HF_HUB_OFFLINE=1`, so `/voice` makes no model downloads or network requests.
+
+Previews stay above the editor. Final text uses native bracketed paste at the current cursor and preserves bundled Vim mode. If the draft changes or a modal has focus, the final stays pending in RAM. At the main prompt, press the recording shortcut to explicitly insert or the cancel shortcut to discard. `/voice insert`, `/voice cancel` and `/voice status` provide command equivalents.
+
+Configuration changes require `/reload`, which stops the worker and discards pending speech. `/voice off`, session replacement and exit also tear it down. Each recording is capped at 60 seconds. Voice writes no audio files or transcript logs. Submitted text still follows normal Pi provider and history behavior. See [Voice](../extensions/voice/README.md) for commands, cleanup limits and explicit manual-test requirements.
+
 ## Additional protected CLIs
 
 ```json

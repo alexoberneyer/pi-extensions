@@ -6,6 +6,7 @@ Moving the code to a separate repository does not add a process, network hop or 
 | ------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | Configuration | Small local JSON reads at startup or explicit operations                                                          | No watchers, network configuration or per-token parsing                                       |
 | Vim           | In-process input handling                                                                                         | Keep native editor behavior and guarded private APIs. Retest Pi upgrades.                     |
+| Voice         | Warm local speech model, capture subprocess and repeated whole-clip inference while enabled                       | Off until enabled. Offline caches required. RAM-only audio, 60-second recording cap.          |
 | Agents        | Presence writes every five seconds. External discovery every five seconds while browsing. UI refresh each second. | Remote disabled without a host. No always-on external discovery daemon.                       |
 | dev01         | SSH startup, remote processes and explicit transfers                                                              | One configured host. No automatic synchronization or retries after uncertain launch outcomes. |
 | Approval      | In-process lexical checks and local Git verification for publishing                                               | Keep confirmations and audit writes. It is not a shell interpreter or sandbox.                |
@@ -21,10 +22,27 @@ Moving the code to a separate repository does not add a process, network hop or 
 2. Remote discovery is absent until configured. This avoids failed SSH probes on other users' machines.
 3. Private memory, style, logging and hooks are off. Enabling memory adds context tokens and can affect prompt-cache reuse, as before.
 4. Comms queue tools require a user action. Opening the local demo does not expose the real queue.
+5. Voice starts off with no capture or worker. `/voice` enables and warms the model only. Recording and optional hold-Space are separate opt-ins.
+
+## Local voice costs
+
+Voice requires macOS arm64 in interactive Pi outside SSH. It uses existing `ffmpeg` and `uv`, cached Python 3.10, pinned `mlx-audio==0.5.3` and `mlx-community/parakeet-tdt-0.6b-v3`. The [explicit setup command](../extensions/voice/README.md#one-time-setup) can download dependencies and the model as needed. Runtime forces `uv run --offline` and `HF_HUB_OFFLINE=1`. Enabling Voice makes no network request or model download and fails if the required caches are missing.
+
+Enabling starts one worker process group per session, not a shared daemon. The model stays warm until Voice is disabled, reloaded, replaced with another session or Pi exits, unless an error stops it first. Ready state retains model memory but does not open the microphone. `ffmpeg` capture starts only on an explicit recording action. No idle CPU or model-memory benchmark is claimed.
+
+Audio is 16 kHz mono 16-bit PCM, kept in RAM with a hard 60-second clip limit. After every two seconds of new audio, the worker redecodes the full bounded clip. Finalization makes a fresh whole-clip pass. This avoids overlap merging and word-boundary guesses, but work per pass grows with clip length. Two seconds is an input threshold, not a guaranteed preview cadence. Longer clips can increase preview and finalization latency. Live previews replace provisional text above the editor, while only the complete final is pasted into the draft.
+
+Capture supervision runs independently of inference. Cancel stops the microphone and retires the result immediately. An in-flight MLX decode cannot be safely interrupted, so that call releases its audio input on return. Stale text cannot revive a cancelled request. Startup and finalization deadlines trigger process-group cleanup, with termination and kill escalation even if the `uv` leader has already exited. The worker also bounds stalled capture. A cleanup failure is reported rather than treated as success.
+
+Voice writes no audio files or transcript logs. Pending finals live only in RAM. Inserted text becomes an ordinary Pi draft, and submitted text follows the usual provider and history paths. Local speech recognition does not make Pi local. There is no text-to-speech, always-listening mode or remote microphone capture.
+
+Synthetic tests exercise control flow and editor integration, not actual microphone hardware or human transcription accuracy. Those require an explicit [manual test](../extensions/voice/README.md#verification). No real-microphone accuracy or latency result is claimed here.
 
 ## Compatibility costs
 
-Vim touches guarded private editor internals. A conservative fallback preserves ordinary typing when their shape changes, but cannot guarantee compatibility with behavioral changes. Supporting Pi 1.5.0 explicitly is preferable to claiming every version works.
+Vim touches guarded private editor internals. A conservative fallback preserves ordinary typing when their shape changes, but cannot guarantee compatibility with behavioral changes. Voice integration is exercised against Pi 1.5.2. The original Pi 1.5.0 extraction check below is historical, not current Voice verification. Retest the relevant suites on Pi upgrades rather than claiming every version works.
+
+Voice's hold shortcut needs Kitty key-release reporting and otherwise falls back to short-press toggling. Optional bare Space needs release reporting too. It uses a 300 ms hold threshold and leaves taps as native typing. The bundled Vim editor permits Space only in INSERT, and the stock editor is supported. Other custom editors require an explicit `acceptsLiteralSpace` getter. Final insertion uses native bracketed paste, not simulated typing, and preserves bundled Vim mode. Changed drafts or modal focus defer the final in RAM until explicit insertion at the main prompt.
 
 Codex app-server discovery and Claude native agent discovery depend on external CLI interfaces. A changed interface should show unavailable, not guessed status. Platform-specific desktop operations remain platform-specific. Publishing the code does not make Apple Reminders portable to Linux.
 
@@ -43,7 +61,7 @@ Model-free test durations are not model-response latency benchmarks. Disabled in
 
 ## Local extraction check
 
-Five alternating fresh-process samples on macOS, using Pi 1.5.0 and Node 26.8.1:
+Historical measurements before Voice was added. Five alternating fresh-process samples on macOS, using Pi 1.5.0 and Node 26.8.1:
 
 | Measurement                          | Original source | Standalone package |
 | ------------------------------------ | --------------- | ------------------ |

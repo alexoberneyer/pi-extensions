@@ -38,6 +38,7 @@
       "./extensions/fast/index.ts",
       "./extensions/supervisor/index.ts",
       "./extensions/vim/index.ts",
+      "./extensions/voice/index.ts",
       "./extensions/web/index.ts",
       "./extensions/workflows/index.ts",
       "./extensions/workstation/index.ts"

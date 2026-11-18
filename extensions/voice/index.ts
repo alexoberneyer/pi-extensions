@@ -13,8 +13,13 @@ import {
 } from "@earendil-works/pi-tui";
 import { readConfig } from "../../lib/config.mjs";
 import { launchWorker } from "./client.mjs";
-import { VoiceController } from "./controller.mjs";
+import {
+  getVoiceWorkerSafety,
+  IDLE_MS,
+  VoiceController,
+} from "./controller.mjs";
 import { VoiceKeys } from "./keys.mjs";
+import { createVoicePreferences } from "./preferences.mjs";
 
 const WIDGET = "local-voice";
 const voiceControl = (text: string) =>
@@ -26,6 +31,9 @@ export function installVoice(
   pi: ExtensionAPI,
   {
     createWorker = launchWorker,
+    preferences = createVoicePreferences(),
+    idleMs = IDLE_MS,
+    safety = getVoiceWorkerSafety(),
     supported = () =>
       process.platform === "darwin" &&
       process.arch === "arm64" &&
@@ -54,8 +62,6 @@ export function installVoice(
     if (!atMain() || !editor || editor.isShowingAutocomplete()) return false;
     if (typeof editor.acceptsLiteralSpace === "boolean")
       return editor.acceptsLiteralSpace;
-    // Only the stock editor is known to be non-modal. A guarded check preserves
-    // its native find-character prompt, for which Space is a valid target.
     return (
       !ctx?.ui.getEditorComponent() &&
       (editor as unknown as { jumpMode?: unknown }).jumpMode === null
@@ -68,8 +74,7 @@ export function installVoice(
       clearTimeout(reportingTimer);
       reportingTimer = undefined;
     } else if (!releaseSupported() && reportingDirty && !reportingTimer) {
-      // Pi consumes Kitty negotiation replies without a render notification.
-      // A bounded retry catches resume negotiation without a permanent poller.
+      // Pi consumes Kitty replies without a render notification on resume.
       let attempts = 0;
       const retry = () => {
         reportingTimer = undefined;
@@ -84,8 +89,7 @@ export function installVoice(
     }
     const wanted = enable && space && releaseSupported();
     if (wanted && (!reporting || reportingDirty)) {
-      // Add only report-all-keys to Pi's current Kitty stack frame. Never push
-      // another frame, which would leak Pi's own frame on suspend/renderer stop.
+      // Modify Pi's current frame, never push a frame that could leak on suspend.
       tui.terminal.write("\x1b[=8;2u");
       reporting = true;
       reportingDirty = false;
@@ -96,8 +100,12 @@ export function installVoice(
   }
 
   const controller = new VoiceController({
+    idleMs,
+    safety,
     createWorker: (callbacks) =>
       createWorker({ ...callbacks, device: config.device }),
+    canStart: (destination: Target | undefined) =>
+      atMain() && destination?.editor === editor,
     onChange: () => render(),
     onNotice: (message, level) => ctx?.ui.notify(message, level),
     onFinal: (text: string, destination: Target | undefined, { explicit }) => {
@@ -110,7 +118,6 @@ export function installVoice(
   });
   const keys = new VoiceKeys({
     shortcut: config.shortcut,
-    cancelShortcut: config.cancelShortcut,
     mode: config.mode,
     getContext: () => ({
       enabled: controller.enabled,
@@ -118,33 +125,67 @@ export function installVoice(
       releaseSupported: releaseSupported(),
       spaceEnabled: space,
       spaceAllowed: spaceAllowed(),
-      ready: controller.state === "ready",
+      ready:
+        ["ready", "standby", "loading"].includes(controller.state) &&
+        !controller.recordingRequested,
       pending: controller.state === "pending",
-      active: ["starting", "recording"].includes(controller.state),
+      active:
+        controller.recordingRequested &&
+        ["loading", "starting", "recording"].includes(controller.state),
     }),
     onStart: () => controller.start(target()),
     onStop: () => controller.stop(),
-    onCancel: () => controller.cancel(),
-    // This is an ordinary delayed Space tap, not transcript delivery. Keep its
-    // native typing/undo semantics rather than inserting it as a paste.
     onTapSpace: () => {
       editor?.handleInput(" ");
       tui?.requestRender();
     },
   });
 
+  function refreshEditor() {
+    const focused = tui?.getFocusedComponent() as PromptEditor | undefined;
+    // Only the main prompt receives Pi's extension-shortcut callback.
+    if (
+      !focused ||
+      typeof focused.onExtensionShortcut !== "function" ||
+      typeof focused.getCursor !== "function"
+    )
+      return false;
+    if (editor === focused) return true;
+    restoreSubmit?.();
+    editor = focused;
+    const previousSubmit = focused.onSubmit;
+    const submit: typeof previousSubmit = (text) => {
+      // Command dispatch bypasses Pi's input event, so guard the real boundary.
+      if (!voiceControl(text)) {
+        keys.reset();
+        controller.cancel();
+      }
+      return previousSubmit?.(text);
+    };
+    focused.onSubmit = submit;
+    restoreSubmit = () => {
+      if (focused.onSubmit === submit) focused.onSubmit = previousSubmit;
+    };
+    return true;
+  }
+
   function widget() {
     ctx!.ui.setWidget(WIDGET, (surface, theme) => {
       tui = surface;
       return {
         render(width) {
+          // On reload without Vim, Pi may focus its reload panel until all
+          // session_start handlers finish. Attach when the real prompt returns.
+          refreshEditor();
           keyboardReporting(controller.enabled);
           const gesture =
             config.mode === "hold" && releaseSupported() ? "hold" : "toggle";
           const hint =
             controller.state === "pending"
-              ? `${config.shortcut} insert · ${config.cancelShortcut} discard`
-              : `${gesture} ${config.shortcut}${space && releaseSupported() ? " or Space in INSERT" : ""} · ${config.cancelShortcut} discard`;
+              ? `${config.shortcut} insert`
+              : controller.state === "loading" && controller.recordingRequested
+                ? "wait before speaking"
+                : `${gesture} ${config.shortcut}${space && releaseSupported() ? " or Space in INSERT" : ""}`;
           const label =
             controller.state === "recording" ? "● recording" : controller.state;
           const lines = wrapTextWithAnsi(
@@ -170,75 +211,67 @@ export function installVoice(
     });
   }
 
+  function disconnect() {
+    keys.reset();
+    keyboardReporting(false);
+    unsubscribe?.();
+    unsubscribe = undefined;
+    restoreSubmit?.();
+    restoreSubmit = undefined;
+    editor = undefined;
+    ctx?.ui.setWidget(WIDGET, undefined);
+  }
+
   function render() {
     if (!ctx) return;
     if (controller.enabled) widget();
-    else {
-      keys.reset();
-      keyboardReporting(false);
-      unsubscribe?.();
-      unsubscribe = undefined;
-      restoreSubmit?.();
-      restoreSubmit = undefined;
-      ctx.ui.setWidget(WIDGET, undefined);
-    }
+    else disconnect();
   }
 
-  function activate(context: ExtensionContext) {
-    if (controller.enabled) return true;
+  function cancelDictation() {
+    keys.reset();
+    controller.cancel();
+  }
+
+  function connect(context: ExtensionContext, deferred = false) {
     if (context.mode !== "tui" || !supported()) {
-      context.ui.notify(
-        "Local voice requires interactive Pi on an Apple silicon Mac, outside SSH.",
-        "warning",
-      );
+      if (!deferred)
+        context.ui.notify(
+          "Local voice requires interactive Pi on an Apple silicon Mac, outside SSH.",
+          "warning",
+        );
       return false;
     }
-    const bindings = getKeybindings().getResolvedBindings();
-    const collision = Object.entries(bindings).find(
-      ([, values]) =>
-        values.includes(config.shortcut) ||
-        values.includes(config.cancelShortcut),
+    if (controller.enabled) {
+      ctx = context;
+      refreshEditor();
+      return true;
+    }
+    const collision = Object.entries(
+      getKeybindings().getResolvedBindings(),
+    ).find(([, value]) =>
+      (Array.isArray(value) ? value : [value]).includes(config.shortcut),
     );
     if (collision) {
       context.ui.notify(
-        `Voice shortcut conflicts with ${collision[0]}. Change voice shortcuts and reload.`,
+        `Voice shortcut conflicts with ${collision[0]}. Change voice shortcuts and restart.`,
         "error",
       );
       return false;
     }
     ctx = context;
     widget();
-    const focused = tui?.getFocusedComponent() as PromptEditor | undefined;
-    // Pi wires onExtensionShortcut on the main prompt, not on dialog editors.
-    if (
-      !focused ||
-      typeof focused.onExtensionShortcut !== "function" ||
-      typeof focused.getCursor !== "function"
-    ) {
-      context.ui.setWidget(WIDGET, undefined);
+    if (!refreshEditor() && !deferred) {
+      disconnect();
       context.ui.notify(
         "Enable voice from Pi's main prompt, not a dialog.",
         "warning",
       );
       return false;
     }
-    editor = focused;
-    const previousSubmit = focused.onSubmit;
-    const submit: typeof previousSubmit = (text) => {
-      // Built-in and extension commands skip Pi's input event. Retire the id at
-      // the actual submission boundary, except explicit voice control commands.
-      if (!voiceControl(text)) {
-        keys.reset();
-        controller.cancel();
-      }
-      return previousSubmit?.(text);
-    };
-    focused.onSubmit = submit;
-    restoreSubmit = () => {
-      if (focused.onSubmit === submit) focused.onSubmit = previousSubmit;
-    };
     let pasting = false;
     unsubscribe = context.ui.onTerminalInput((data) => {
+      refreshEditor();
       if (pasting || data.includes("\x1b[200~")) {
         keys.flushTap();
         pasting = !data.includes("\x1b[201~");
@@ -246,30 +279,29 @@ export function installVoice(
       }
       const release = isKeyRelease(data);
       const bindings = getKeybindings();
+      if (!release && bindings.matches(data, "app.clear")) {
+        // Still let Pi handle clearing and double-Ctrl+C exit. Escape is not
+        // intercepted. Retire speech before native clearing can change drafts.
+        cancelDictation();
+      }
       if (
         !release &&
         atMain() &&
         bindings.matches(data, "app.message.followUp") &&
         context.ui.getEditorText().trim() &&
         !voiceControl(context.ui.getEditorText())
-      ) {
-        // While streaming, follow-up bypasses the editor's onSubmit callback.
-        keys.reset();
-        controller.cancel();
-      }
-      // A detached capture must not continue while Pi is suspended or hands its
-      // terminal to an external editor. Respect remapped application bindings.
+      )
+        cancelDictation();
       if (
         !release &&
         ["app.suspend", "app.editor.external"].some((action) =>
-          getKeybindings().matches(
+          bindings.matches(
             data,
             action as "app.suspend" | "app.editor.external",
           ),
         )
       ) {
-        keys.reset();
-        controller.cancel();
+        cancelDictation();
         keyboardReporting(false);
         reportingDirty = true;
       }
@@ -281,22 +313,44 @@ export function installVoice(
         text: !data.startsWith("\x1b") && /[^\x00-\x1f\x7f]/.test(data),
       });
     });
+    return true;
+  }
+
+  function enableFromUser(context: ExtensionContext) {
+    if (!connect(context)) return;
+    try {
+      preferences.write(true);
+    } catch {
+      context.ui.notify(
+        "Cannot save Voice preference. Voice was not enabled persistently.",
+        "error",
+      );
+      if (!controller.enabled) disconnect();
+      return;
+    }
     controller.enable();
     if (!controller.enabled) render();
-    return controller.enabled;
+  }
+
+  async function disableFromUser(context: ExtensionContext) {
+    const closing = controller.disable();
+    try {
+      preferences.write(false);
+    } catch {
+      context.ui.notify(
+        "Cannot save Voice preference. Voice is off here, but future sessions may still enable it.",
+        "error",
+      );
+    }
+    await closing;
   }
 
   pi.registerShortcut(config.shortcut, {
     description:
-      "Enable local voice, then hold/toggle recording or insert pending text",
+      "Enable local voice, hold/toggle recording or insert pending text",
     handler: async (context) => {
-      if (!controller.enabled) activate(context);
+      if (!controller.enabled) enableFromUser(context);
     },
-  });
-  pi.registerShortcut(config.cancelShortcut, {
-    description:
-      "Discard local dictation without changing Vim or Pi's Escape behavior",
-    handler: async () => controller.cancel(),
   });
   pi.registerCommand("voice", {
     description:
@@ -319,18 +373,21 @@ export function installVoice(
     handler: async (args, context) => {
       const command = args.trim().toLowerCase();
       if (!command || command === "on") {
-        if (!command && controller.enabled) await controller.disable();
-        else activate(context);
-      } else if (command === "off") await controller.disable();
-      else if (command === "cancel") controller.cancel();
+        if (!command && controller.enabled) await disableFromUser(context);
+        else enableFromUser(context);
+      } else if (command === "off") await disableFromUser(context);
+      else if (command === "cancel") cancelDictation();
       else if (command === "stop") controller.stop();
       else if (command === "start") {
+        refreshEditor();
         if (controller.enabled && atMain()) controller.start(target());
-        else activate(context);
-      } else if (command === "insert") controller.insertPending(target());
-      else if (command === "status")
+        else if (!controller.enabled) enableFromUser(context);
+      } else if (command === "insert") {
+        refreshEditor();
+        controller.insertPending(target());
+      } else if (command === "status")
         context.ui.notify(
-          `Voice ${controller.state}. Microphone capture starts only on a recording gesture or /voice start.`,
+          `Voice ${controller.state}. Standby has no model loaded. Wait for recording before speaking after a cold start.`,
           "info",
         );
       else if (command === "space on" || command === "space off") {
@@ -347,6 +404,20 @@ export function installVoice(
           "warning",
         );
     },
+  });
+  pi.on("session_start", (_event, context) => {
+    if (context.mode !== "tui" || !supported() || controller.enabled) return;
+    try {
+      if (preferences.read() && connect(context, true)) {
+        controller.enable({ warm: false });
+        if (!controller.enabled) render();
+      }
+    } catch {
+      context.ui.notify(
+        "Cannot read saved Voice preference. Voice remains off.",
+        "error",
+      );
+    }
   });
   pi.on("session_shutdown", async () => {
     await controller.disable();

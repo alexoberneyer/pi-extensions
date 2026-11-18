@@ -27,7 +27,7 @@ From GitHub:
 pi install git:github.com/alexoberneyer/pi-extensions@v0.1.0
 ```
 
-Run `/reload` in existing Pi sessions. Use `pi config` to select the extensions you want. Package filters can select individual entrypoints, for example:
+Run `/reload` in existing Pi sessions. After updating the Voice implementation, fully restart Pi instead. Its native JavaScript modules remain cached across reloads. Use `pi config` to select the extensions you want. Package filters can select individual entrypoints, for example:
 
 ```json
 {
@@ -47,19 +47,19 @@ Do not load this package alongside older copies of the same extensions. See [mig
 
 ## Included extensions
 
-| Extension                                       | Purpose                                            | Default behavior                                 |
-| ----------------------------------------------- | -------------------------------------------------- | ------------------------------------------------ |
-| [Vim](extensions/vim/README.md)                 | Vim motions, operators and undo/redo in the prompt | Interactive editor only                          |
-| [Web](extensions/web/README.md)                 | Brave search and public-page extraction            | Tools available, no requests until called        |
-| [Fast](extensions/fast/README.md)               | Supported-provider speed tiers                     | Off for new sessions                             |
-| [Voice](extensions/voice/README.md)             | Local microphone dictation into the prompt         | Off until `/voice`, enabling warms only          |
-| [Agents](extensions/agents/README.md)           | Pi, Claude, Codex and tmux dashboard               | Local Pi presence, discovery only while browsing |
-| [dev01](extensions/dev01/README.md)             | Explicit remote jobs and file transfers            | Disabled without a configured SSH host           |
-| [Approval](extensions/approval/README.md)       | Confirmation and plan-mode workflow guards         | Generic guards active                            |
-| [Workflows](extensions/workflows/README.md)     | Plan mode, checklist, subagents and notification   | Plan mode off, bundled guard loaded              |
-| [Supervisor](extensions/supervisor/README.md)   | Persistent, human-interruptible Pi workers         | Off until explicitly enabled                     |
-| [Comms](extensions/comms/README.md)             | Communication review queue, drafts and captures    | Queue tools inactive until a user action         |
-| [Workstation](extensions/workstation/README.md) | Private memory, style, resources and hooks         | All private integrations off                     |
+| Extension                                       | Purpose                                            | Default behavior                                                 |
+| ----------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------- |
+| [Vim](extensions/vim/README.md)                 | Vim motions, operators and undo/redo in the prompt | Interactive editor only                                          |
+| [Web](extensions/web/README.md)                 | Brave search and public-page extraction            | Tools available, no requests until called                        |
+| [Fast](extensions/fast/README.md)               | Supported-provider speed tiers                     | Off for new sessions                                             |
+| [Voice](extensions/voice/README.md)             | Local microphone dictation into the prompt         | Initially off unless saved on. Restores standby without a model. |
+| [Agents](extensions/agents/README.md)           | Pi, Claude, Codex and tmux dashboard               | Local Pi presence, discovery only while browsing                 |
+| [dev01](extensions/dev01/README.md)             | Explicit remote jobs and file transfers            | Disabled without a configured SSH host                           |
+| [Approval](extensions/approval/README.md)       | Confirmation and plan-mode workflow guards         | Generic guards active                                            |
+| [Workflows](extensions/workflows/README.md)     | Plan mode, checklist, subagents and notification   | Plan mode off, bundled guard loaded                              |
+| [Supervisor](extensions/supervisor/README.md)   | Persistent, human-interruptible Pi workers         | Off until explicitly enabled                                     |
+| [Comms](extensions/comms/README.md)             | Communication review queue, drafts and captures    | Queue tools inactive until a user action                         |
+| [Workstation](extensions/workstation/README.md) | Private memory, style, resources and hooks         | All private integrations off                                     |
 
 `workflows`, `supervisor` and `comms` initialize the bundled approval guard even when installed individually. Registration is deduplicated within the extension runtime. Unknown/broken guard configuration blocks tools rather than silently weakening protection.
 
@@ -80,7 +80,7 @@ See [configuration](docs/configuration.md) for optional integrations and [perfor
 3. **Remote work:** SSH, Bash, tmux and the selected agent must already work on the configured host. Transfers require rsync with `--protect-args`.
 4. **Desktop sources:** Apple Reminders needs macOS Automation permission. reMarkable uses a configured desktop copy and optional Python dependencies. Unsupported desktop features stay unavailable on other systems.
 5. **Web and Comms:** Brave needs your own key. Web extraction uses `uvx`. Comms uses your existing Claude or Pi connectors, not shared credentials or an included Microsoft 365 connection.
-6. **Voice (optional):** macOS arm64 in a local interactive terminal, outside SSH. Requires existing `ffmpeg` and `uv`, cached Python 3.10, `mlx-audio==0.5.3` and the Parakeet model. [Set up the offline cache explicitly](extensions/voice/README.md#one-time-setup). Enabling `/voice` only warms the model. Recording is separate. Local speech recognition does not make Pi's provider or history local.
+6. **Voice (optional):** macOS arm64 in a local interactive terminal, outside SSH. Requires existing `ffmpeg` and `uv`, cached Python 3.10, `mlx-audio==0.5.3` and the Parakeet model. [Set up the offline cache explicitly](extensions/voice/README.md#one-time-setup). `/voice on` saves enabled and warms only this window. Future sessions restore standby without a model worker or microphone. Five idle minutes unload the worker without disabling Voice. Recording is explicit. Ctrl+C discards dictation while retaining native editor clearing and double-press exit. Local speech recognition does not make Pi's provider or history local.
 
 Use scoped credentials and actual isolation for untrusted or unattended work. Approval patterns, tool annotations, project trust and task scopes do not restrict operating-system access. Worker processes inherit much of the environment and share their selected working directory.
 

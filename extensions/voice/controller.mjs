@@ -1,6 +1,14 @@
 import { stripVTControlCharacters } from "node:util";
 import { launchWorker } from "./client.mjs";
 
+export const IDLE_MS = 300_000;
+const SAFETY = Symbol.for("pi-extensions.voice.worker-safety.v1");
+
+/** A failed process-group teardown must remain blocked across Pi reloads. */
+export function getVoiceWorkerSafety() {
+  return (globalThis[SAFETY] ??= { teardownFailed: false });
+}
+
 function safeNotice(error) {
   const message = typeof error === "string" ? error : error?.message;
   if (typeof message !== "string")
@@ -41,13 +49,17 @@ export class VoiceController {
   #startupMs;
   #finalizeMs;
   #recordingMs;
+  #idleMs;
+  #canStart;
   #worker;
   #generation = 0;
   #nextId = 0;
   #request;
+  #queuedStart;
   #timer;
+  #idleTimer;
   #closing;
-  #teardownFailed = false;
+  #safety;
 
   constructor({
     createWorker = launchWorker,
@@ -57,6 +69,9 @@ export class VoiceController {
     startupMs = 60_000,
     finalizeMs = 15_000,
     recordingMs = 60_000,
+    idleMs = IDLE_MS,
+    canStart = () => true,
+    safety = { teardownFailed: false },
   } = {}) {
     this.#createWorker = createWorker;
     this.#onChange = onChange;
@@ -65,10 +80,17 @@ export class VoiceController {
     this.#startupMs = startupMs;
     this.#finalizeMs = finalizeMs;
     this.#recordingMs = recordingMs;
+    this.#idleMs = idleMs;
+    this.#canStart = canStart;
+    this.#safety = safety;
   }
 
   get enabled() {
     return this.state !== "off";
+  }
+
+  get recordingRequested() {
+    return Boolean(this.#queuedStart || this.#request);
   }
 
   #changed() {
@@ -78,6 +100,38 @@ export class VoiceController {
   #clearTimer() {
     clearTimeout(this.#timer);
     this.#timer = undefined;
+  }
+
+  #clearIdleTimer() {
+    clearTimeout(this.#idleTimer);
+    this.#idleTimer = undefined;
+  }
+
+  #scheduleIdle() {
+    this.#clearIdleTimer();
+    if (
+      !this.#worker ||
+      this.recordingRequested ||
+      !["ready", "pending"].includes(this.state)
+    )
+      return;
+    const generation = this.#generation;
+    const worker = this.#worker;
+    this.#idleTimer = setTimeout(() => {
+      if (
+        generation !== this.#generation ||
+        worker !== this.#worker ||
+        this.recordingRequested ||
+        !["ready", "pending"].includes(this.state)
+      )
+        return;
+      this.#clearIdleTimer();
+      ++this.#generation;
+      this.#worker = undefined;
+      if (this.state !== "pending") this.state = "standby";
+      void this.#close(worker);
+      this.#changed();
+    }, this.#idleMs);
   }
 
   #deadline(ms, callback) {
@@ -101,7 +155,7 @@ export class VoiceController {
     const closing = Promise.all([
       this.#closing,
       current.catch(() => {
-        this.#teardownFailed = true;
+        this.#safety.teardownFailed = true;
         this.#onNotice(
           "Voice worker did not stop. Restart Pi before retrying.",
           "error",
@@ -128,48 +182,118 @@ export class VoiceController {
     }
   }
 
-  enable() {
-    if (this.enabled) return;
-    if (this.#closing || this.#teardownFailed) {
+  enable({ warm = true } = {}) {
+    if (this.enabled) {
+      if (warm) this.warm();
+      return;
+    }
+    if (this.#closing || this.#safety.teardownFailed) {
       this.#onNotice(
-        this.#teardownFailed
+        this.#safety.teardownFailed
           ? "Voice worker did not stop. Restart Pi before retrying."
           : "Voice worker is stopping. Enable voice again after cleanup.",
-        this.#teardownFailed ? "error" : "info",
+        this.#safety.teardownFailed ? "error" : "info",
       );
       return;
     }
+    this.state = "standby";
+    if (warm) this.warm();
+    else this.#changed();
+  }
+
+  warm() {
+    if (!this.enabled) return this.enable();
+    if (this.state !== "standby") return;
+    if (this.#safety.teardownFailed)
+      return this.#fail(
+        "Voice worker did not stop. Restart Pi before retrying.",
+      );
     const generation = ++this.#generation;
     this.state = "loading";
+    this.#clearIdleTimer();
+    this.#changed();
+    if (this.#closing) {
+      // Idle cleanup owns the old process group until close has settled.
+      void this.#closing.then(() => this.#launch(generation));
+    } else this.#launch(generation);
+  }
+
+  #launch(generation) {
+    if (generation !== this.#generation || this.state !== "loading") return;
+    if (this.#safety.teardownFailed)
+      return this.#fail(
+        "Voice worker did not stop. Restart Pi before retrying.",
+      );
     this.#deadline(this.#startupMs, () =>
       this.#fail(
         "Voice model startup timed out. Check the offline model cache and retry.",
       ),
     );
-    this.#changed();
+    const early = [];
+    let assigned = false;
+    const receive = (type, value) => {
+      if (generation !== this.#generation || !this.enabled) return;
+      if (!assigned) early.push([type, value]);
+      else if (type === "event") this.#event(value);
+      else this.#fail(safeNotice(value));
+    };
     try {
       const worker = this.#createWorker({
-        onEvent: (event) => {
-          if (generation === this.#generation && this.enabled)
-            this.#event(event);
-        },
-        onError: (error) => {
-          if (generation === this.#generation && this.enabled)
-            this.#fail(safeNotice(error));
-        },
+        onEvent: (event) => receive("event", event),
+        onError: (error) => receive("error", error),
       });
-      // A factory can report a synchronous startup error before returning.
-      if (generation !== this.#generation) void this.#close(worker);
-      else this.#worker = worker;
+      if (generation !== this.#generation) {
+        void this.#close(worker);
+        return;
+      }
+      // A synchronous ready callback may immediately consume a queued start.
+      this.#worker = worker;
+      assigned = true;
+      for (const [type, value] of early) receive(type, value);
     } catch (error) {
       if (generation === this.#generation) this.#fail(safeNotice(error));
+    }
+  }
+
+  #startQueued() {
+    const queued = this.#queuedStart;
+    if (!queued || this.state !== "ready") return;
+    const generation = this.#generation;
+    let allowed = false;
+    try {
+      allowed = this.#canStart(queued.target) === true;
+    } catch {
+      // A failed focus check must never open the microphone.
+    }
+    if (
+      generation !== this.#generation ||
+      queued !== this.#queuedStart ||
+      this.state !== "ready"
+    )
+      return;
+    this.#queuedStart = undefined;
+    if (allowed) this.#startCapture(queued.target);
+    else {
+      this.#scheduleIdle();
+      this.#changed();
     }
   }
 
   start(target) {
     if (this.state === "off") return this.enable();
     if (this.state === "pending") return this.insertPending(target);
-    if (this.state !== "ready") return;
+    if (["standby", "loading"].includes(this.state)) {
+      this.#queuedStart = { target };
+      if (this.state === "standby") this.warm();
+      else this.#changed();
+      return;
+    }
+    if (this.state === "ready") this.#startCapture(target);
+  }
+
+  #startCapture(target) {
+    this.#queuedStart = undefined;
+    this.#clearIdleTimer();
     if (this.#nextId >= Number.MAX_SAFE_INTEGER)
       return this.#fail(
         "Voice recording limit reached. Restart Pi before retrying.",
@@ -187,6 +311,12 @@ export class VoiceController {
   }
 
   stop() {
+    if (this.#queuedStart) {
+      this.#queuedStart = undefined;
+      this.#scheduleIdle();
+      this.#changed();
+      return;
+    }
     if (
       !this.#request ||
       !["starting", "recording", "finalizing"].includes(this.state)
@@ -205,15 +335,22 @@ export class VoiceController {
   }
 
   cancel() {
+    const hadVoiceActivity =
+      this.recordingRequested ||
+      this.state === "pending" ||
+      ["starting", "recording", "finalizing"].includes(this.state);
     const request = this.#request;
     this.#request = undefined;
+    this.#queuedStart = undefined;
     this.preview = "";
     this.pendingText = "";
-    if (this.state !== "loading") {
+    if (this.state !== "loading" || !this.#worker) {
       this.#clearTimer();
-      if (this.enabled) this.state = "ready";
+      if (this.state === "loading") ++this.#generation;
+      if (this.enabled) this.state = this.#worker ? "ready" : "standby";
     }
     if (request) this.#send({ type: "cancel", id: request.id });
+    if (hadVoiceActivity) this.#scheduleIdle();
     this.#changed();
   }
 
@@ -237,8 +374,9 @@ export class VoiceController {
     if (delivered) {
       this.pendingText = "";
       this.preview = "";
-      this.state = "ready";
+      this.state = this.#worker ? "ready" : "standby";
     }
+    this.#scheduleIdle();
     this.#changed();
     return delivered;
   }
@@ -246,9 +384,11 @@ export class VoiceController {
   disable() {
     ++this.#generation;
     this.#clearTimer();
+    this.#clearIdleTimer();
     const worker = this.#worker;
     this.#worker = undefined;
     this.#request = undefined;
+    this.#queuedStart = undefined;
     this.preview = "";
     this.pendingText = "";
     this.state = "off";
@@ -263,7 +403,9 @@ export class VoiceController {
       if (this.state !== "loading") return;
       this.#clearTimer();
       this.state = "ready";
+      this.#scheduleIdle();
       this.#changed();
+      this.#startQueued();
       return;
     }
     const request = this.#request;
@@ -311,6 +453,7 @@ export class VoiceController {
       this.pendingText = delivered ? "" : text;
       this.preview = delivered ? "" : text;
       this.state = delivered ? "ready" : "pending";
+      this.#scheduleIdle();
       this.#changed();
     }
   }

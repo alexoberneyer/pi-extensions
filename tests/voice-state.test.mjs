@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { launchWorker } from "../extensions/voice/client.mjs";
-import { VoiceController } from "../extensions/voice/controller.mjs";
+import { IDLE_MS, VoiceController } from "../extensions/voice/controller.mjs";
 
 assert.ok(process.env.PI_TEST_PACKAGE_DIR, "Run with node scripts/test.mjs.");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -91,6 +91,26 @@ test("a failed teardown blocks reenabling rather than overlapping capture groups
   assert.equal(h.controller.state, "off");
   assert.equal(h.workers.length, 1);
   assert.match(h.notices.at(-1)[0], /Restart Pi/);
+});
+
+test("failed worker ownership remains blocked in a recreated controller", async (t) => {
+  const safety = { teardownFailed: false };
+  const old = controllerHarness(t, { safety });
+  const worker = ready(old);
+  worker.close = () => Promise.reject(new Error("synthetic teardown failure"));
+  await old.controller.disable();
+  const notices = [];
+  const replacement = new VoiceController({
+    safety,
+    createWorker: () =>
+      assert.fail("Failed ownership must prevent replacement"),
+    onNotice: (message) => notices.push(message),
+  });
+  t.after(() => replacement.disable());
+  replacement.enable({ warm: false });
+  assert.equal(replacement.enabled, false);
+  replacement.enable();
+  assert.match(notices.at(-1), /Restart Pi/);
 });
 
 class FakePipe extends EventEmitter {
@@ -206,11 +226,32 @@ test("voice modules and controller construction do not spawn or allocate timers"
   const client = await import("../extensions/voice/client.mjs?cold");
   const controller = await import("../extensions/voice/controller.mjs?cold");
   assert.deepEqual(Object.keys(client), ["launchWorker"]);
-  assert.deepEqual(Object.keys(controller), ["VoiceController"]);
+  assert.deepEqual(Object.keys(controller), [
+    "IDLE_MS",
+    "VoiceController",
+    "getVoiceWorkerSafety",
+  ]);
+  const regular = await import("../extensions/voice/controller.mjs");
+  assert.equal(
+    controller.getVoiceWorkerSafety(),
+    regular.getVoiceWorkerSafety(),
+  );
+  assert.equal(controller.IDLE_MS, 300_000);
   const voice = new controller.VoiceController();
   assert.equal(voice.state, "off");
   assert.equal(voice.preview, "");
   assert.equal(voice.pendingText, "");
+  assert.equal(voice.enabled, false);
+  assert.equal(voice.recordingRequested, false);
+  voice.enable({ warm: false });
+  assert.equal(voice.state, "standby");
+  assert.equal(voice.enabled, true);
+  assert.equal(voice.recordingRequested, false);
+  voice.enable({ warm: false });
+  voice.stop();
+  voice.cancel();
+  assert.equal(voice.state, "standby");
+  await voice.disable();
   assert.equal(voice.enabled, false);
   assert.deepEqual(
     process.eventNames().map((name) => [name, process.listenerCount(name)]),
@@ -225,7 +266,7 @@ test("enable and start from off only load; ready never opens the microphone", (t
   assert.equal(h.controller.state, "loading");
   assert.equal(h.controller.enabled, true);
   h.controller.enable();
-  h.controller.start({ editor: 2 });
+  assert.equal(h.controller.recordingRequested, false);
   assert.equal(h.workers.length, 1);
   assert.deepEqual(h.workers[0].commands, []);
   h.workers[0].onEvent({ type: "ready" });
@@ -498,6 +539,489 @@ test("synchronous factory errors and ready callbacks are generation-safe", async
   assert.equal(sync.state, "ready");
   await sync.disable();
 });
+
+const flushCleanup = () => new Promise(setImmediate);
+
+for (const action of ["warm", "enable"]) {
+  test(`${action} explicitly warms standby without requesting capture`, (t) => {
+    const h = controllerHarness(t);
+    h.controller.enable({ warm: false });
+    assert.equal(h.workers.length, 0);
+    h.controller[action]();
+    assert.equal(h.controller.state, "loading");
+    assert.equal(h.controller.enabled, true);
+    assert.equal(h.controller.recordingRequested, false);
+    h.workers[0].onEvent({ type: "ready" });
+    assert.equal(h.controller.state, "ready");
+    assert.deepEqual(h.workers[0].commands, []);
+  });
+}
+
+test("five idle minutes close the entire worker while voice stays enabled", async (t) => {
+  const h = controllerHarness(t);
+  const worker = ready(h);
+  t.mock.timers.tick(IDLE_MS - 1);
+  assert.equal(worker.closed, 0);
+  assert.equal(h.controller.state, "ready");
+  t.mock.timers.tick(1);
+  assert.equal(worker.closed, 1);
+  assert.equal(h.controller.state, "standby");
+  assert.equal(h.controller.enabled, true);
+  assert.equal(h.controller.recordingRequested, false);
+  t.mock.timers.tick(IDLE_MS * 2);
+  assert.equal(worker.closed, 1);
+  await flushCleanup();
+  assert.deepEqual(h.notices, []);
+});
+
+for (const initial of ["standby", "loading"]) {
+  test(`an explicit start in ${initial} queues capture for the original target`, (t) => {
+    const h = controllerHarness(t);
+    const target = { editor: "synthetic cold target" };
+    h.controller.enable({ warm: initial === "loading" });
+    h.controller.start(target);
+    const worker = h.workers[0];
+    assert.equal(h.controller.state, "loading");
+    assert.equal(h.controller.recordingRequested, true);
+    assert.deepEqual(worker.commands, []);
+    worker.onEvent({ type: "ready" });
+    assert.equal(h.controller.state, "starting");
+    assert.equal(h.controller.recordingRequested, true);
+    assert.deepEqual(worker.commands, [{ type: "start", id: 1 }]);
+    worker.onEvent({ type: "recording", id: 1 });
+    assert.equal(h.controller.recordingRequested, true);
+    h.controller.stop();
+    assert.equal(h.controller.recordingRequested, true);
+    worker.onEvent({ type: "final", id: 1, text: "cold result" });
+    assert.equal(h.controller.state, "ready");
+    assert.equal(h.controller.recordingRequested, false);
+    assert.deepEqual(h.finals, [["cold result", target, { explicit: false }]]);
+  });
+}
+
+for (const action of ["stop", "cancel"]) {
+  test(`${action} during a cold hold or toggle retires intent before model readiness`, (t) => {
+    const h = controllerHarness(t, { idleMs: 100 });
+    h.controller.enable({ warm: false });
+    h.controller.start({ editor: "released target" });
+    const worker = h.workers[0];
+    t.mock.timers.tick(50);
+    h.controller[action]();
+    assert.equal(h.controller.state, "loading");
+    assert.equal(h.controller.enabled, true);
+    assert.equal(h.controller.recordingRequested, false);
+    worker.onEvent({ type: "ready" });
+    assert.equal(h.controller.state, "ready");
+    assert.deepEqual(worker.commands, []);
+    for (const type of ["recording", "partial", "final", "cancelled", "error"])
+      worker.onEvent({ type, id: 1, text: "late", message: "late" });
+    assert.equal(h.controller.state, "ready");
+    assert.deepEqual(h.finals, []);
+    assert.deepEqual(h.notices, []);
+    t.mock.timers.tick(99);
+    assert.equal(worker.closed, 0);
+    t.mock.timers.tick(1);
+    assert.equal(worker.closed, 1);
+    assert.equal(h.controller.state, "standby");
+  });
+
+  test(`${action} clears queued intent without resetting the startup deadline`, (t) => {
+    const h = controllerHarness(t, { startupMs: 100, idleMs: 10 });
+    h.controller.enable({ warm: false });
+    h.controller.start({ editor: "sample" });
+    const worker = h.workers[0];
+    t.mock.timers.tick(90);
+    h.controller[action]();
+    assert.equal(h.controller.recordingRequested, false);
+    t.mock.timers.tick(9);
+    assert.equal(h.controller.state, "loading");
+    assert.equal(worker.closed, 0);
+    t.mock.timers.tick(1);
+    assert.equal(h.controller.state, "off");
+    assert.equal(worker.closed, 1);
+    worker.onEvent({ type: "ready" });
+    assert.deepEqual(worker.commands, []);
+  });
+}
+
+test("a new gesture after an early release can queue a fresh target without another worker", (t) => {
+  const h = controllerHarness(t);
+  h.controller.enable({ warm: false });
+  h.controller.start({ editor: "released" });
+  h.controller.stop();
+  const target = { editor: "new gesture" };
+  h.controller.start(target);
+  h.workers[0].onEvent({ type: "ready" });
+  h.workers[0].onEvent({ type: "final", id: 1, text: "new result" });
+  assert.equal(h.workers.length, 1);
+  assert.deepEqual(h.finals, [["new result", target, { explicit: false }]]);
+});
+
+test("off during a queued load cannot revive capture through late callbacks", async (t) => {
+  const h = controllerHarness(t, { startupMs: 100, idleMs: 100 });
+  h.controller.enable({ warm: false });
+  h.controller.start({ editor: "old" });
+  const old = h.workers[0];
+  await h.controller.disable();
+  assert.equal(h.controller.recordingRequested, false);
+  h.controller.enable({ warm: false });
+  old.onEvent({ type: "ready" });
+  old.onEvent({ type: "error", message: "private model failure" });
+  old.onError(new Error("private model failure"));
+  t.mock.timers.tick(1_000);
+  assert.equal(h.controller.state, "standby");
+  assert.equal(h.controller.enabled, true);
+  assert.equal(h.workers.length, 1);
+  assert.equal(old.closed, 1);
+  assert.deepEqual(old.commands, []);
+  assert.deepEqual(h.notices, []);
+});
+
+for (const action of ["insertPending", "start", "cancel", "disable"]) {
+  test(`pending text survives idle unload and ${action} never wakes a model`, async (t) => {
+    let accepted = false;
+    const attempts = [];
+    const h = controllerHarness(t, {
+      idleMs: 100,
+      onFinal: (...args) => {
+        attempts.push(args);
+        return accepted;
+      },
+    });
+    const { worker, id, target } = record(h);
+    worker.onEvent({ type: "final", id, text: "pending sample" });
+    assert.equal(h.controller.recordingRequested, false);
+    t.mock.timers.tick(100);
+    assert.equal(worker.closed, 1);
+    assert.equal(h.controller.enabled, true);
+    assert.equal(h.controller.state, "pending");
+    assert.equal(h.controller.pendingText, "pending sample");
+    assert.equal(h.controller.preview, "pending sample");
+    h.controller.enable();
+    h.controller.warm();
+    const replacement = { editor: "replacement" };
+    assert.equal(h.controller.insertPending(replacement), false);
+    assert.equal(h.controller.state, "pending");
+    assert.equal(h.workers.length, 1);
+    accepted = true;
+    await h.controller[action](replacement);
+    assert.equal(h.workers.length, 1);
+    assert.equal(h.controller.state, action === "disable" ? "off" : "standby");
+    assert.equal(h.controller.enabled, action !== "disable");
+    assert.equal(h.controller.recordingRequested, false);
+    assert.equal(h.controller.pendingText, "");
+    assert.equal(h.controller.preview, "");
+    assert.deepEqual(attempts, [
+      ["pending sample", target, { explicit: false }],
+      ["pending sample", replacement, { explicit: true }],
+      ...(["start", "insertPending"].includes(action)
+        ? [["pending sample", replacement, { explicit: true }]]
+        : []),
+    ]);
+    t.mock.timers.tick(1_000);
+    assert.equal(worker.closed, 1);
+  });
+}
+
+test("idle unload invalidates every old worker callback and preserves increasing request IDs", async (t) => {
+  const h = controllerHarness(t, { idleMs: 100 });
+  const { worker: old, id } = record(h);
+  old.onEvent({ type: "final", id, text: "first result" });
+  t.mock.timers.tick(100);
+  await flushCleanup();
+  h.controller.start({ editor: "new target" });
+  const current = h.workers[1];
+  for (const phase of ["loading", "starting"]) {
+    if (phase === "starting") current.onEvent({ type: "ready" });
+    old.onEvent({ type: "ready" });
+    for (const type of ["recording", "partial", "final", "cancelled", "error"])
+      old.onEvent({ type, id, text: "late", message: "late" });
+    old.onEvent({ type: "error", message: "late model error" });
+    old.onError(new Error("late crash"));
+    assert.equal(h.controller.state, phase);
+    assert.equal(h.controller.recordingRequested, true);
+    assert.equal(h.controller.preview, "");
+    assert.deepEqual(h.notices, []);
+    assert.equal(h.finals.length, 1);
+  }
+  assert.deepEqual(current.commands, [{ type: "start", id: id + 1 }]);
+});
+
+for (const action of ["keep", "stop", "cancel", "disable"]) {
+  test(`a start during idle cleanup waits for close and honors ${action}`, async (t) => {
+    const h = controllerHarness(t, { idleMs: 100, startupMs: 100 });
+    const old = ready(h);
+    let finish;
+    old.close = () => {
+      old.closed++;
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    };
+    t.mock.timers.tick(100);
+    h.controller.start({ editor: "queued replacement" });
+    assert.equal(h.controller.state, "loading");
+    assert.equal(h.controller.recordingRequested, true);
+    assert.equal(h.workers.length, 1);
+    t.mock.timers.tick(1_000);
+    assert.equal(h.controller.state, "loading", "startup waits for cleanup");
+    let closing;
+    if (action === "stop") h.controller.stop();
+    if (action === "cancel") {
+      h.controller.cancel();
+      assert.equal(h.controller.state, "standby");
+    }
+    if (action === "disable") {
+      closing = h.controller.disable();
+      assert.equal(closing, h.controller.disable());
+    }
+    finish();
+    await closing;
+    await flushCleanup();
+    assert.equal(old.closed, 1);
+    assert.equal(h.workers.length, ["keep", "stop"].includes(action) ? 2 : 1);
+    if (["keep", "stop"].includes(action)) {
+      const replacement = h.workers[1];
+      assert.equal(h.controller.state, "loading");
+      replacement.onEvent({ type: "ready" });
+      assert.equal(
+        h.controller.state,
+        action === "keep" ? "starting" : "ready",
+      );
+      assert.deepEqual(
+        replacement.commands,
+        action === "keep" ? [{ type: "start", id: 1 }] : [],
+      );
+      assert.equal(h.controller.recordingRequested, action === "keep");
+    } else {
+      assert.equal(h.controller.state, action === "cancel" ? "standby" : "off");
+      assert.equal(h.controller.recordingRequested, false);
+    }
+    assert.deepEqual(h.notices, []);
+  });
+}
+
+for (const mode of ["reject", "throw"]) {
+  test(`idle cleanup ${mode} blocks a queued replacement and warns safely`, async (t) => {
+    const h = controllerHarness(t, { idleMs: 100 });
+    const old = ready(h);
+    old.close = () => {
+      old.closed++;
+      const error = new Error("private teardown details");
+      if (mode === "throw") throw error;
+      return Promise.reject(error);
+    };
+    t.mock.timers.tick(100);
+    h.controller.start({ editor: "blocked replacement" });
+    await flushCleanup();
+    assert.equal(h.controller.state, "off");
+    assert.equal(h.controller.recordingRequested, false);
+    h.controller.enable();
+    h.controller.start({ editor: "still blocked" });
+    assert.equal(h.controller.state, "off");
+    assert.equal(h.workers.length, 1);
+    assert.equal(old.closed, 1);
+    assert.ok(h.notices.length > 0);
+    for (const [message, level] of h.notices) {
+      assert.match(message, /Restart Pi/);
+      assert.doesNotMatch(message, /private|details/);
+      assert.equal(level, "error");
+    }
+  });
+}
+
+test("a cold start rechecks its target after loading and a false guard leaves it idle", (t) => {
+  let focused = true;
+  const targets = [];
+  const h = controllerHarness(t, {
+    idleMs: 100,
+    canStart: (target) => {
+      targets.push(target);
+      return focused;
+    },
+  });
+  const target = { editor: "main" };
+  h.controller.enable({ warm: false });
+  h.controller.start(target);
+  focused = false;
+  h.workers[0].onEvent({ type: "ready" });
+  assert.deepEqual(targets, [target]);
+  assert.equal(h.controller.state, "ready");
+  assert.equal(h.controller.recordingRequested, false);
+  assert.deepEqual(h.workers[0].commands, []);
+  t.mock.timers.tick(100);
+  assert.equal(h.controller.state, "standby");
+});
+
+for (const action of ["stop", "cancel", "disable", "throw"]) {
+  test(`canStart ${action} cannot open the microphone reentrantly`, (t) => {
+    let controller;
+    const h = controllerHarness(t, {
+      canStart: () => {
+        if (action === "throw") throw new Error("private focus details");
+        controller[action]();
+        return true;
+      },
+    });
+    controller = h.controller;
+    controller.enable({ warm: false });
+    controller.start({ editor: "main" });
+    h.workers[0].onEvent({ type: "ready" });
+    assert.equal(controller.state, action === "disable" ? "off" : "ready");
+    assert.equal(controller.recordingRequested, false);
+    assert.deepEqual(h.workers[0].commands, []);
+    assert.deepEqual(h.notices, []);
+  });
+}
+
+for (const phase of ["loading", "starting", "recording", "finalizing"]) {
+  test(`idle timeout never closes a ${phase} worker`, (t) => {
+    const h = controllerHarness(t, {
+      idleMs: 100,
+      startupMs: 1_000,
+      finalizeMs: 1_000,
+      recordingMs: 1_000,
+    });
+    h.controller.enable();
+    const worker = h.workers[0];
+    if (phase !== "loading") {
+      worker.onEvent({ type: "ready" });
+      t.mock.timers.tick(99);
+      h.controller.start({ editor: "sample" });
+      if (["recording", "finalizing"].includes(phase))
+        worker.onEvent({ type: "recording", id: 1 });
+      if (phase === "finalizing") h.controller.stop();
+    }
+    t.mock.timers.tick(101);
+    assert.equal(h.controller.state, phase);
+    assert.equal(worker.closed, 0);
+  });
+}
+
+for (const outcome of ["final", "cancel", "cancelled", "empty"]) {
+  test(`${outcome} resets idle time after capture`, (t) => {
+    const h = controllerHarness(t, { idleMs: 100 });
+    const { worker, id } = record(h);
+    t.mock.timers.tick(90);
+    if (outcome === "cancel") h.controller.cancel();
+    else
+      worker.onEvent({
+        type: outcome === "cancelled" ? "cancelled" : "final",
+        id,
+        text: outcome === "empty" ? " " : "sample result",
+      });
+    assert.equal(h.controller.state, "ready");
+    assert.equal(h.controller.recordingRequested, false);
+    t.mock.timers.tick(99);
+    assert.equal(worker.closed, 0);
+    t.mock.timers.tick(1);
+    assert.equal(h.controller.state, "standby");
+    assert.equal(worker.closed, 1);
+  });
+}
+
+for (const action of ["insertPending", "start", "cancel"]) {
+  test(`${action} resets a resident pending worker's idle deadline`, (t) => {
+    let accepted = false;
+    const h = controllerHarness(t, { idleMs: 100, onFinal: () => accepted });
+    const { worker, id } = record(h);
+    worker.onEvent({ type: "final", id, text: "pending result" });
+    t.mock.timers.tick(90);
+    h.controller.insertPending({ editor: "unavailable" });
+    t.mock.timers.tick(99);
+    assert.equal(worker.closed, 0);
+    assert.equal(h.controller.state, "pending");
+    accepted = true;
+    h.controller[action]({ editor: "replacement" });
+    assert.equal(h.controller.state, "ready");
+    t.mock.timers.tick(99);
+    assert.equal(worker.closed, 0);
+    t.mock.timers.tick(1);
+    assert.equal(worker.closed, 1);
+    assert.equal(h.controller.state, "standby");
+  });
+}
+
+test("empty cancel preserves ready idle time and disable clears every outstanding timer", async (t) => {
+  const h = controllerHarness(t, { idleMs: 100 });
+  const old = ready(h);
+  t.mock.timers.tick(90);
+  h.controller.cancel();
+  t.mock.timers.tick(9);
+  assert.equal(old.closed, 0);
+  t.mock.timers.tick(1);
+  assert.equal(old.closed, 1);
+  assert.equal(h.controller.state, "standby");
+  await h.controller.disable();
+  h.controller.enable({ warm: false });
+  t.mock.timers.tick(1_000);
+  assert.equal(h.controller.state, "standby");
+  assert.equal(h.workers.length, 1);
+  assert.equal(old.closed, 1);
+});
+
+test("synchronous ready assigns the worker before sending a queued cold start", (t) => {
+  const commands = [];
+  let assigned = false;
+  const h = controllerHarness(t, {
+    idleMs: 100,
+    createWorker({ onEvent }) {
+      onEvent({ type: "ready" });
+      assigned = true;
+      return {
+        send(event) {
+          assert.equal(assigned, true);
+          commands.push(event);
+          onEvent({ type: "recording", id: event.id });
+          return true;
+        },
+        close() {},
+      };
+    },
+  });
+  h.controller.enable({ warm: false });
+  h.controller.start({ editor: "sample" });
+  assert.equal(h.controller.state, "recording");
+  assert.equal(h.controller.recordingRequested, true);
+  assert.deepEqual(commands, [{ type: "start", id: 1 }]);
+  t.mock.timers.tick(100);
+  assert.equal(h.controller.state, "recording");
+});
+
+for (const kind of ["callback", "event", "throw"]) {
+  test(`synchronous factory ${kind} failure clears queued capture and ignores late ready`, (t) => {
+    let callbacks;
+    let closed = 0;
+    const commands = [];
+    const h = controllerHarness(t, {
+      createWorker(handlers) {
+        callbacks = handlers;
+        const message = "private model details";
+        if (kind === "throw") throw new Error(message);
+        if (kind === "callback") handlers.onError(new Error(message));
+        else handlers.onEvent({ type: "error", message });
+        handlers.onEvent({ type: "ready" });
+        return {
+          send: (event) => commands.push(event),
+          close: () => {
+            closed++;
+          },
+        };
+      },
+    });
+    h.controller.enable({ warm: false });
+    h.controller.start({ editor: "sample" });
+    assert.equal(h.controller.state, "off");
+    assert.equal(h.controller.recordingRequested, false);
+    assert.equal(closed, kind === "throw" ? 0 : 1);
+    assert.equal(h.notices.length, 1);
+    assert.match(h.notices[0][0], /model/);
+    assert.doesNotMatch(h.notices[0][0], /private|details/);
+    callbacks.onEvent({ type: "ready" });
+    assert.deepEqual(commands, []);
+    assert.equal(h.controller.state, "off");
+  });
+}
 
 test("client launches the exact isolated offline command, with stderr discarded", (t) => {
   const h = clientHarness(t);

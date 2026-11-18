@@ -49,13 +49,6 @@ export class VoiceKeys {
       }
       return { consume: true };
     }
-    if (key === o.cancelShortcut && (context.atMain || context.active)) {
-      if (!release && !repeat) {
-        this.reset();
-        o.onCancel();
-      }
-      return { consume: true };
-    }
     // Flush a pending tap before another key, including Escape. It is not a
     // dictation cancellation, and the other key still reaches Vim/Pi normally.
     if (this.#spaceTimer && (key || text) && !release && !repeat) this.#tap();

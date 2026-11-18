@@ -13,7 +13,6 @@
   },
   "voice": {
     "shortcut": "ctrl+space",
-    "cancelShortcut": "ctrl+alt+x",
     "mode": "hold",
     "space": false,
     "device": ":default"

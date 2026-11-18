@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { VoiceKeys } from "../extensions/voice/keys.mjs";
+import { readConfig } from "../lib/config.mjs";
 
 const packageDir = process.env.PI_TEST_PACKAGE_DIR;
 assert.ok(packageDir, "Run with node scripts/test.mjs.");
@@ -41,7 +49,6 @@ const {
 
 const config = {
   shortcut: "ctrl+space",
-  cancelShortcut: "ctrl+alt+x",
   mode: "hold",
   space: false,
   device: ":default",
@@ -53,7 +60,8 @@ const kitty = (key, modifiers = 1, event = 1) =>
 const press = kitty(" ", 5);
 const repeat = kitty(" ", 5, 2);
 const release = kitty(" ", 5, 3);
-const cancel = kitty("x", 7);
+const cancel = "\x03";
+const oldCancel = kitty("x", 7);
 const spacePress = kitty(" ");
 const spaceRelease = kitty(" ", 1, 3);
 const tick = () => new Promise((done) => setImmediate(done));
@@ -71,6 +79,12 @@ const theme = {
     ].map((key) => [key, identity]),
   ),
 };
+
+// Enable the clock before any worker can schedule its five-minute idle timer.
+// Replacing timers after activation would leave the earlier real timer alive.
+test.beforeEach((t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+});
 
 function parsed(data) {
   return {
@@ -94,13 +108,22 @@ function normalAtStart(editor, text) {
 }
 
 function harness(t, options = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "pi-voice-test-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const directory =
+    options.directory ?? mkdtempSync(join(tmpdir(), "pi-voice-test-"));
+  if (!options.directory)
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
   const configFile = join(directory, "config.json");
-  writeFileSync(
-    configFile,
-    JSON.stringify(options.voice ? { voice: options.voice } : {}),
-  );
+  const preferenceFile = join(directory, "voice-state.json");
+  if (!existsSync(configFile) || options.voice)
+    writeFileSync(
+      configFile,
+      JSON.stringify(options.voice ? { voice: options.voice } : {}),
+    );
+  if (Object.hasOwn(options, "saved"))
+    writeFileSync(
+      preferenceFile,
+      JSON.stringify({ version: 1, enabled: options.saved }),
+    );
   const commands = new Map();
   const shortcuts = new Map();
   const events = new Map();
@@ -185,7 +208,8 @@ function harness(t, options = {}) {
       await handler({ type: name, ...event }, ctx);
   }
   editor.onEscape = () => interrupts++;
-  editor.onAction("app.clear", () => editor.setText(""));
+  const nativeClear = t.mock.fn(() => editor.setText(""));
+  editor.onAction("app.clear", nativeClear);
   editor.onSubmit = (text) => {
     submissions.push(text);
     // Pi dispatches commands before its input event, including built-ins.
@@ -216,6 +240,9 @@ function harness(t, options = {}) {
   try {
     process.env.PI_EXTENSIONS_CONFIG = configFile;
     controller = installVoice(pi, {
+      preferences: options.preferences,
+      idleMs: options.idleMs,
+      safety: options.safety ?? { teardownFailed: false },
       supported: () => options.supported ?? true,
       createWorker(callbacks) {
         const worker = {
@@ -225,7 +252,7 @@ function harness(t, options = {}) {
           emit: (event) => callbacks.onEvent(event),
           send(event) {
             this.commands.push(event);
-            if (event.type === "start")
+            if (event.type === "start" && options.autoRecording !== false)
               queueMicrotask(() =>
                 this.emit({ type: "recording", id: event.id }),
               );
@@ -236,7 +263,8 @@ function harness(t, options = {}) {
           },
         };
         workers.push(worker);
-        queueMicrotask(() => worker.emit({ type: "ready" }));
+        if (options.autoReady !== false)
+          queueMicrotask(() => worker.emit({ type: "ready" }));
         return worker;
       },
     });
@@ -250,6 +278,10 @@ function harness(t, options = {}) {
     assert.equal(ctx.abort.mock.callCount(), 0);
   });
   const h = {
+    directory,
+    configFile,
+    preferenceFile,
+    nativeClear,
     controller,
     editor,
     ctx,
@@ -284,7 +316,12 @@ function harness(t, options = {}) {
       return new CustomEditor(tui, theme, bindings);
     },
     emit,
-    renderWidget: () => widget?.render(80).join("\n") ?? "",
+    renderWidget() {
+      const text = widget?.render(80).join("\n") ?? "";
+      assert.doesNotMatch(text, /discard|ctrl\+alt\+x/i);
+      return text;
+    },
+    saved: () => JSON.parse(readFileSync(preferenceFile, "utf8")).enabled,
     command: (args) => commands.get("voice").handler(args, ctx),
     async input(data) {
       for (const listener of listeners) {
@@ -318,7 +355,6 @@ function harness(t, options = {}) {
 }
 
 function keysHarness(t, options = {}) {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
   const context = {
     enabled: true,
     atMain: true,
@@ -344,10 +380,6 @@ function keysHarness(t, options = {}) {
       actions.push("stop");
       context.active = false;
     },
-    onCancel() {
-      actions.push("cancel");
-      context.active = false;
-    },
     onTapSpace: () => actions.push("space"),
   });
   t.after(() => keys.reset());
@@ -364,10 +396,8 @@ test("defaults install and session startup allocate no voice resources", async (
   assert.equal(h.listeners.size, h.baselineListeners);
   assert.deepEqual(h.widgetCalls, []);
   assert.deepEqual(h.writes, []);
-  assert.deepEqual(
-    [...h.shortcuts.keys()],
-    [config.shortcut, config.cancelShortcut],
-  );
+  assert.deepEqual([...h.shortcuts.keys()], [config.shortcut]);
+  assert.equal(existsSync(h.preferenceFile), false);
   assert.deepEqual([...h.commands.keys()], ["voice"]);
   assert.equal(
     h.commands.get("voice").getArgumentCompletions("space ").length,
@@ -385,6 +415,8 @@ for (const activation of ["command", "shortcut", "start"]) {
     assert.equal(h.worker.callbacks.device, config.device);
     assert.deepEqual(h.worker.commands, []);
     assert.match(h.renderWidget(), /ready.*hold ctrl\+space/);
+    assert.equal(h.saved(), true);
+    assert.equal(readFileSync(h.configFile, "utf8"), "{}");
     assert.deepEqual(h.writes, [], "Space reporting is opt-in");
     await h.command("on");
     assert.equal(h.workers.length, 1);
@@ -392,9 +424,402 @@ for (const activation of ["command", "shortcut", "start"]) {
   });
 }
 
+for (const editor of ["vim", "stock"]) {
+  test(`${editor} saved enabled restores standby without model, microphone or timers`, async (t) => {
+    const h = harness(t, { editor, saved: true });
+    t.mock.method(globalThis, "setTimeout", () => assert.fail("restore timer"));
+    await h.emit("session_start", { reason: "startup" });
+    assert.equal(h.controller.state, "standby");
+    assert.equal(h.controller.enabled, true);
+    assert.equal(h.controller.recordingRequested, false);
+    assert.equal(h.workers.length, 0);
+    assert.equal(h.listeners.size, h.baselineListeners + 1);
+    assert.match(h.renderWidget(), /standby/);
+    assert.equal(h.saved(), true);
+    assert.deepEqual(h.writes, []);
+    assert.deepEqual(h.notices, []);
+    await h.emit("session_shutdown", { reason: "reload" });
+    assert.equal(h.saved(), true, "shutdown must not persist off");
+  });
+}
+
+test("new windows and factories read the latest preference without syncing existing windows", async (t) => {
+  const first = harness(t);
+  const second = harness(t, { directory: first.directory });
+  await first.enable();
+  await second.emit("session_start");
+  assert.equal(second.controller.state, "standby");
+  assert.equal(second.workers.length, 0);
+  await first.emit("session_shutdown", { reason: "reload" });
+  assert.equal(first.saved(), true);
+  const third = harness(t, { directory: first.directory });
+  await third.emit("session_start");
+  assert.equal(third.controller.state, "standby");
+  assert.equal(third.workers.length, 0);
+  await second.command("off");
+  assert.equal(second.saved(), false);
+  assert.equal(third.controller.state, "standby", "no cross-window auto-sync");
+  const fourth = harness(t, { directory: first.directory });
+  await fourth.emit("session_start");
+  assert.equal(fourth.controller.state, "off");
+  assert.equal(fourth.workers.length, 0);
+  assert.deepEqual(fourth.widgetCalls, []);
+  assert.equal(readFileSync(first.configFile, "utf8"), "{}");
+});
+
+for (const failure of ["malformed JSON", "invalid schema", "read failure"]) {
+  test(`saved preference ${failure} leaves Voice off with a safe notice`, async (t) => {
+    const h = harness(t);
+    if (failure === "read failure") mkdirSync(h.preferenceFile);
+    else
+      writeFileSync(
+        h.preferenceFile,
+        failure === "malformed JSON"
+          ? "{synthetic private diagnostic"
+          : '{"version":1,"enabled":"true"}',
+      );
+    await h.emit("session_start");
+    assert.equal(h.controller.state, "off");
+    assert.equal(h.workers.length, 0);
+    assert.equal(h.listeners.size, h.baselineListeners);
+    assert.deepEqual(h.widgetCalls, []);
+    assert.equal(h.notices.length, 1);
+    assert.equal(h.notices[0].level, "error");
+    assert.match(h.notices[0].message, /Cannot read saved Voice preference/);
+    assert.doesNotMatch(
+      h.notices[0].message,
+      /private|diagnostic|voice-state\.json/,
+    );
+  });
+}
+
+for (const activation of ["on", "start", "shortcut"]) {
+  test(`${activation} cannot load a model when persisting on fails`, async (t) => {
+    const writes = [];
+    const h = harness(t, {
+      preferences: {
+        read: () => false,
+        write(value) {
+          writes.push(value);
+          throw new Error("synthetic private save diagnostic");
+        },
+      },
+    });
+    if (activation === "shortcut") await h.input(press);
+    else await h.command(activation);
+    assert.deepEqual(writes, [true]);
+    assert.equal(h.controller.state, "off");
+    assert.equal(h.workers.length, 0);
+    assert.equal(h.listeners.size, h.baselineListeners);
+    assert.equal(h.widget, undefined);
+    assert.match(h.notices[0].message, /Cannot save Voice preference/);
+    assert.doesNotMatch(h.notices[0].message, /private|diagnostic/);
+  });
+}
+
+test("off still closes a recording worker if persisting off fails; shutdown never writes", async (t) => {
+  const writes = [];
+  const h = harness(t, {
+    preferences: {
+      read: () => false,
+      write(value) {
+        writes.push(value);
+        if (!value) throw new Error("synthetic private save diagnostic");
+      },
+    },
+  });
+  await h.enable();
+  const id = await h.record();
+  await h.command("off");
+  assert.deepEqual(writes, [true, false]);
+  assert.equal(h.controller.state, "off");
+  assert.equal(h.worker.closed, 1);
+  assert.equal(h.listeners.size, h.baselineListeners);
+  assert.equal(h.widget, undefined);
+  assert.match(h.notices[0].message, /Voice is off here/);
+  assert.doesNotMatch(h.notices[0].message, /private|diagnostic/);
+  h.worker.emit({ type: "final", id, text: "late speech" });
+  assert.deepEqual(h.pastes, []);
+  await h.emit("session_shutdown");
+  assert.deepEqual(writes, [true, false]);
+});
+
+for (const attachment of ["render", "input"]) {
+  test(`stock reload restore defers main editor binding until ${attachment}`, async (t) => {
+    const h = harness(t, { editor: "stock", dialog: true, saved: true });
+    const original = h.editor.onSubmit;
+    await h.emit("session_start", { reason: "reload" });
+    assert.equal(h.controller.state, "standby");
+    assert.equal(h.workers.length, 0);
+    assert.match(h.renderWidget(), /standby/);
+    assert.equal(h.editor.onSubmit, original);
+    assert.deepEqual(h.notices, []);
+    h.focus();
+    if (attachment === "render") h.renderWidget();
+    else await h.input("\x01"); // Refresh through native input without changing the draft.
+    assert.notEqual(h.editor.onSubmit, original);
+    await h.input(press);
+    await tick();
+    assert.equal(h.controller.state, "recording");
+    const id = h.worker.commands.at(-1).id;
+    await h.input(release);
+    await h.type("/fixture-extension");
+    await h.input("\r");
+    h.worker.emit({ type: "final", id, text: "retired speech" });
+    assert.equal(h.editor.getText(), "");
+    assert.deepEqual(h.pastes, []);
+    await h.command("off");
+    assert.equal(h.saved(), false);
+    assert.equal(h.editor.onSubmit, original);
+  });
+}
+
+for (const initial of ["standby", "loading"]) {
+  test(`hold from ${initial} queues consent and waits for recording before speaking`, async (t) => {
+    const h = harness(t, {
+      saved: true,
+      autoReady: false,
+      autoRecording: false,
+    });
+    await h.emit("session_start");
+    if (initial === "loading") await h.command("on");
+    await h.input(press);
+    assert.equal(h.controller.state, "loading");
+    assert.equal(h.controller.recordingRequested, true);
+    assert.deepEqual(h.worker.commands, []);
+    assert.match(h.renderWidget(), /loading.*wait before speaking/);
+    h.worker.emit({ type: "ready" });
+    assert.equal(h.controller.state, "starting");
+    const id = h.worker.commands.at(-1).id;
+    assert.deepEqual(h.worker.commands, [{ type: "start", id }]);
+    assert.doesNotMatch(h.renderWidget(), /● recording/);
+    await h.command("status");
+    assert.match(
+      h.notices.at(-1).message,
+      /Wait for recording before speaking/,
+    );
+    h.worker.emit({ type: "recording", id });
+    assert.equal(h.controller.state, "recording");
+    assert.match(h.renderWidget(), /● recording/);
+    await h.input(release);
+    assert.equal(h.controller.state, "finalizing");
+    h.worker.emit({ type: "final", id, text: "cold result" });
+    assert.equal(h.ctx.ui.getEditorText(), "cold result");
+    assert.equal(h.controller.recordingRequested, false);
+  });
+}
+
+for (const gesture of [
+  "hold release",
+  "toggle second tap",
+  "legacy NUL second tap",
+  "Ctrl+C",
+]) {
+  test(`${gesture} cancels cold queued capture before model readiness`, async (t) => {
+    const toggle = gesture === "toggle second tap";
+    const h = harness(t, {
+      saved: true,
+      autoReady: false,
+      voice: toggle ? { mode: "toggle" } : {},
+    });
+    h.editor.setText("draft");
+    await h.emit("session_start");
+    const key = gesture === "legacy NUL second tap" ? "\x00" : press;
+    await h.input(key);
+    assert.equal(h.controller.recordingRequested, true);
+    assert.equal(h.controller.state, "loading");
+    await h.input(
+      gesture === "hold release"
+        ? release
+        : gesture === "Ctrl+C"
+          ? cancel
+          : key,
+    );
+    assert.equal(h.controller.recordingRequested, false);
+    h.worker.emit({ type: "ready" });
+    assert.equal(h.controller.state, "ready");
+    assert.deepEqual(h.worker.commands, []);
+    for (const type of ["recording", "partial", "final"])
+      h.worker.emit({ type, id: 1, text: "late unrequested speech" });
+    assert.deepEqual(h.pastes, []);
+    assert.equal(h.ctx.ui.getEditorText(), gesture === "Ctrl+C" ? "" : "draft");
+    await h.input(release);
+    const id = await h.record();
+    assert.ok(id > 0, "the next gesture can start after a queued cancellation");
+  });
+}
+
+test("cold model readiness rechecks focus before starting capture", async (t) => {
+  const h = harness(t, { saved: true, autoReady: false });
+  await h.emit("session_start");
+  await h.input(press);
+  h.focus(h.dialog());
+  h.worker.emit({ type: "ready" });
+  assert.equal(h.controller.state, "ready");
+  assert.equal(h.controller.recordingRequested, false);
+  assert.deepEqual(h.worker.commands, []);
+  await h.input(release);
+  h.focus();
+  await h.record();
+});
+
+test("typed Pi activity does not retain an unused model beyond its Voice idle deadline", async (t) => {
+  const h = harness(t, { idleMs: 1000 });
+  await h.enable();
+  for (let i = 0; i < 4; i++) {
+    t.mock.timers.tick(200);
+    await h.type("typed prompt");
+    await h.input("\r");
+    assert.equal(h.controller.state, "ready");
+  }
+  t.mock.timers.tick(200);
+  await tick();
+  assert.equal(h.controller.state, "standby");
+  assert.equal(h.worker.closed, 1);
+  assert.equal(h.saved(), true);
+});
+
+test("reload cannot bypass a failed process teardown or leave inactive UI hooks", async (t) => {
+  const safety = { teardownFailed: false };
+  const old = harness(t, { safety });
+  await old.enable();
+  old.worker.close = () =>
+    Promise.reject(new Error("synthetic teardown failure"));
+  await old.emit("session_shutdown", { reason: "reload" });
+  const next = harness(t, { safety, directory: old.directory });
+  await next.emit("session_start", { reason: "reload" });
+  assert.equal(next.controller.enabled, false);
+  assert.equal(next.workers.length, 0);
+  assert.equal(next.listeners.size, next.baselineListeners);
+  assert.equal(next.widget, undefined);
+  assert.match(next.notices[0].message, /Restart Pi/);
+  assert.equal(next.saved(), true);
+});
+
+test("five idle minutes unload the worker without disabling Voice and on explicitly warms again", async (t) => {
+  const h = harness(t);
+  await h.enable();
+  const old = h.worker;
+  t.mock.timers.tick(299_999);
+  assert.equal(h.controller.state, "ready");
+  assert.equal(old.closed, 0);
+  t.mock.timers.tick(1);
+  await tick();
+  assert.equal(h.controller.state, "standby");
+  assert.equal(h.controller.enabled, true);
+  assert.equal(old.closed, 1);
+  assert.equal(h.saved(), true);
+  assert.match(h.renderWidget(), /standby/);
+  await h.command("on");
+  assert.equal(h.workers.length, 2);
+  assert.equal(h.controller.state, "ready");
+  assert.deepEqual(h.worker.commands, []);
+  await h.emit("session_shutdown");
+  t.mock.timers.tick(600_000);
+  assert.equal(h.controller.state, "off");
+  assert.equal(h.worker.closed, 1);
+  assert.equal(h.workers.length, 2);
+  assert.equal(h.saved(), true);
+});
+
+for (const action of ["shortcut", "insert", "cancel", "Ctrl+C"]) {
+  test(`pending final survives injected idle unload and ${action} does not wake a model`, async (t) => {
+    const h = harness(t, { idleMs: 1000, voice: { mode: "toggle" } });
+    h.editor.setText("draft");
+    await h.enable();
+    const id = await h.record();
+    await h.type(" changed");
+    await h.input(press);
+    h.worker.emit({ type: "final", id, text: " pending result" });
+    t.mock.timers.tick(999);
+    assert.equal(h.worker.closed, 0);
+    t.mock.timers.tick(1);
+    await tick();
+    assert.equal(h.worker.closed, 1);
+    assert.equal(h.controller.state, "pending");
+    assert.equal(h.controller.pendingText, " pending result");
+    assert.match(h.renderWidget(), /ctrl\+space insert/);
+    if (action === "shortcut") await h.input(press);
+    else if (action === "Ctrl+C") await h.input(cancel);
+    else await h.command(action);
+    assert.equal(h.workers.length, 1);
+    assert.equal(h.controller.state, "standby");
+    assert.equal(h.controller.pendingText, "");
+    assert.equal(h.controller.preview, "");
+    const inserted = ["shortcut", "insert"].includes(action);
+    assert.equal(
+      h.ctx.ui.getEditorText(),
+      action === "Ctrl+C"
+        ? ""
+        : "draft changed" + (inserted ? " pending result" : ""),
+    );
+    assert.deepEqual(h.pastes, inserted ? [" pending result"] : []);
+    h.worker.emit({ type: "final", id, text: "duplicate speech" });
+    t.mock.timers.tick(300_000);
+    assert.equal(h.workers.length, 1);
+    assert.equal(h.worker.closed, 1);
+  });
+}
+
+test("resolved app.clear cancels before its native action, not a hardcoded Ctrl+C chord", async (t) => {
+  const h = harness(t, { bindings: { "app.clear": "ctrl+alt+k" } });
+  h.editor.setText("draft");
+  await h.enable();
+  const id = await h.record();
+  await h.input(cancel);
+  assert.equal(h.controller.state, "recording");
+  assert.equal(h.nativeClear.mock.callCount(), 0);
+  assert.equal(await h.input(kitty("k", 7)), undefined);
+  assert.equal(h.controller.state, "ready");
+  assert.equal(h.editor.getText(), "");
+  assert.equal(h.nativeClear.mock.callCount(), 1);
+  assert.deepEqual(h.worker.commands.at(-1), { type: "cancel", id });
+  await h.input(release);
+  await h.record();
+});
+
+test("Ctrl+C cancels recording even after focus moves to a dialog and still reaches that dialog", async (t) => {
+  const h = harness(t);
+  await h.enable();
+  const id = await h.record();
+  const dialog = h.dialog();
+  dialog.setText("dialog draft");
+  const clear = t.mock.fn(() => dialog.setText(""));
+  dialog.onAction("app.clear", clear);
+  h.focus(dialog);
+  assert.equal(await h.input(cancel), undefined);
+  assert.equal(clear.mock.callCount(), 1);
+  assert.equal(dialog.getText(), "");
+  assert.equal(h.controller.state, "ready");
+  assert.deepEqual(h.worker.commands.at(-1), { type: "cancel", id });
+  h.worker.emit({ type: "final", id, text: "late speech" });
+  assert.deepEqual(h.pastes, []);
+});
+
+test("Ctrl+C resets a pending Space tap without inserting it into the cleared draft", async (t) => {
+  const h = harness(t, { voice: { space: true } });
+  h.editor.setText("draft");
+  await h.enable();
+  await h.input(spacePress);
+  t.mock.timers.tick(299);
+  assert.equal(await h.input(cancel), undefined);
+  t.mock.timers.tick(1000);
+  await h.input(spaceRelease);
+  assert.equal(h.editor.getText(), "");
+  assert.equal(h.nativeClear.mock.callCount(), 1);
+  assert.deepEqual(h.worker.commands, []);
+});
+
 for (const mode of ["print", "rpc", "json"]) {
   test(`${mode} cannot enable voice or allocate resources`, async (t) => {
-    const h = harness(t, { mode });
+    const h = harness(t, {
+      mode,
+      preferences: {
+        read: () => assert.fail("non-TUI preference read"),
+        write: () => assert.fail("non-TUI preference write"),
+      },
+    });
+    await h.emit("session_start");
     await h.command("on");
     assert.equal(h.controller.state, "off");
     assert.equal(h.workers.length, 0);
@@ -424,7 +849,14 @@ test("the previous Ctrl+Alt+V recording shortcut remains an explicit override", 
 });
 
 test("unsupported hosts reject activation before creating a worker", async (t) => {
-  const h = harness(t, { supported: false });
+  const h = harness(t, {
+    supported: false,
+    preferences: {
+      read: () => assert.fail("unsupported preference read"),
+      write: () => assert.fail("unsupported preference write"),
+    },
+  });
+  await h.emit("session_start");
   await h.command("on");
   assert.equal(h.controller.state, "off");
   assert.equal(h.workers.length, 0);
@@ -551,7 +983,6 @@ test("Escape and agent abort notifications do not cancel late finals or change N
 test("Normal f followed by encoded Space remains a literal Vim search target", async (t) => {
   const h = harness(t, { voice: { space: true } });
   await h.enable();
-  t.mock.timers.enable({ apis: ["setTimeout"] });
   normalAtStart(h.editor, "a b c");
   await h.input("f");
   assert.match(h.editor.render(80).at(-1), /f · NORMAL/);
@@ -600,7 +1031,6 @@ for (const editor of ["vim", "stock"]) {
     await h.input("/");
     await tick();
     assert.equal(h.editor.isShowingAutocomplete(), true);
-    t.mock.timers.enable({ apis: ["setTimeout"] });
     assert.equal(await h.input(spacePress), undefined);
     t.mock.timers.tick(300);
     await h.input(spaceRelease);
@@ -615,7 +1045,6 @@ for (const editor of ["vim", "stock"]) {
     await h.input("\x01"); // Native line start.
     await h.input("\x1d"); // Native jump forward.
     if (editor === "vim") assert.equal(h.editor.acceptsLiteralSpace, false);
-    t.mock.timers.enable({ apis: ["setTimeout"] });
     assert.equal(await h.input(spacePress), undefined);
     t.mock.timers.tick(300);
     await h.input(spaceRelease);
@@ -626,7 +1055,7 @@ for (const editor of ["vim", "stock"]) {
 }
 
 test("provisional previews replace only the widget, never a typed draft", async (t) => {
-  const h = harness(t);
+  const h = harness(t, { voice: { mode: "toggle" } });
   h.editor.setText("draft ");
   await h.enable();
   const id = await h.record();
@@ -703,7 +1132,7 @@ test("a changed draft keeps the final pending until the record shortcut explicit
   assert.equal(h.controller.pendingText, " spoken");
   assert.equal(h.ctx.ui.getEditorText(), "draft changed");
   assert.deepEqual(h.pastes, []);
-  assert.match(h.renderWidget(), /ctrl\+space insert.*ctrl\+alt\+x discard/);
+  assert.match(h.renderWidget(), /ctrl\+space insert/);
   await h.input(press);
   await h.input(release);
   assert.equal(h.ctx.ui.getEditorText(), "draft changed spoken");
@@ -716,31 +1145,56 @@ test("a changed draft keeps the final pending until the record shortcut explicit
   );
 });
 
-for (const phase of ["recording", "finalizing", "pending"]) {
-  test(`cancel discards only ${phase} speech, preserving the draft`, async (t) => {
-    const h = harness(t, { voice: { mode: "toggle" } });
-    h.editor.setText("draft");
-    await h.enable();
-    const id = await h.record();
-    await h.type(" changed");
-    h.worker.emit({ type: "partial", id, text: "discard this" });
-    if (phase !== "recording") await h.input(press);
-    if (phase === "pending")
-      h.worker.emit({ type: "final", id, text: "discard this" });
-    assert.equal(h.controller.state, phase);
-    await h.input(cancel);
-    assert.equal(h.controller.state, "ready");
-    assert.equal(h.controller.pendingText, "");
-    assert.equal(h.controller.preview, "");
-    assert.equal(h.ctx.ui.getEditorText(), "draft changed");
-    assertMode(h.editor, "INSERT");
-    h.worker.emit({ type: "final", id, text: "late discarded final" });
-    assert.deepEqual(h.pastes, []);
-  });
+for (const editor of ["vim", "stock"]) {
+  for (const phase of ["recording", "finalizing", "pending"]) {
+    test(`${editor} Ctrl+C clears the draft and retires ${phase} speech before native clear`, async (t) => {
+      const h = harness(t, { editor, voice: { mode: "toggle" } });
+      h.editor.setText("draft");
+      await h.enable();
+      const id = await h.record();
+      await h.type(" changed");
+      h.worker.emit({ type: "partial", id, text: "synthetic preview" });
+      if (phase !== "recording") await h.input(press);
+      if (phase === "pending")
+        h.worker.emit({ type: "final", id, text: "synthetic result" });
+      assert.equal(h.controller.state, phase);
+      h.editor.onAction("app.clear", () => {
+        assert.equal(h.controller.recordingRequested, false);
+        assert.equal(h.controller.pendingText, "");
+        assert.equal(h.controller.preview, "");
+        h.nativeClear();
+      });
+      assert.equal(await h.input(cancel), undefined);
+      assert.equal(h.controller.state, "ready");
+      assert.equal(h.ctx.ui.getEditorText(), "");
+      assert.equal(h.nativeClear.mock.callCount(), 1);
+      if (editor === "vim") assertMode(h.editor, "INSERT");
+      if (phase !== "pending")
+        assert.deepEqual(h.worker.commands.at(-1), { type: "cancel", id });
+      for (const type of ["recording", "partial", "final", "cancelled"])
+        h.worker.emit({ type, id, text: "late retired speech" });
+      assert.equal(h.ctx.ui.getEditorText(), "");
+      assert.deepEqual(h.pastes, []);
+      await h.input(cancel);
+      assert.equal(
+        h.nativeClear.mock.callCount(),
+        2,
+        "Voice must not swallow Pi's second clear/exit action",
+      );
+      await h.type("new draft");
+      const next = await h.record();
+      assert.ok(next > id);
+      h.worker.emit({ type: "final", id, text: "retired final" });
+      assert.equal(h.ctx.ui.getEditorText(), "new draft");
+      await h.input(press);
+      h.worker.emit({ type: "final", id: next, text: " current result" });
+      assert.equal(h.ctx.ui.getEditorText(), "new draft current result");
+    });
+  }
 }
 
 test("interactive submission retires active IDs before the next prompt", async (t) => {
-  const h = harness(t);
+  const h = harness(t, { voice: { mode: "toggle" } });
   h.editor.setText("first prompt");
   await h.enable();
   const id = await h.record();
@@ -813,7 +1267,6 @@ for (const [binding, data] of [
 
 for (const data of [paste("X"), "e\u0301", "你好"]) {
   test(`pending Space tap precedes ${JSON.stringify(data)} without starting capture`, async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
     const h = harness(t, { voice: { space: true } });
     await h.enable();
     await h.input(spacePress);
@@ -843,7 +1296,10 @@ for (const [binding, data] of [
   ["ctrl+alt+f", kitty("f", 7)],
 ]) {
   test(`resolved follow-up ${binding} retires capture even when onSubmit is bypassed`, async (t) => {
-    const h = harness(t, { bindings: { "app.message.followUp": binding } });
+    const h = harness(t, {
+      bindings: { "app.message.followUp": binding },
+      voice: { mode: "toggle" },
+    });
     h.editor.onAction("app.message.followUp", () => {
       h.submissions.push(h.ctx.ui.getEditorText());
       h.editor.setText("");
@@ -861,7 +1317,6 @@ for (const [binding, data] of [
 }
 
 test("hold-Space reporting recovers after asynchronous resume negotiation without another render", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
   const h = harness(t, { voice: { space: true } });
   await h.enable();
   h.renderWidget();
@@ -879,7 +1334,6 @@ test("hold-Space reporting recovers after asynchronous resume negotiation withou
 });
 
 test("disabling voice clears pending keyboard-negotiation retries", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
   const h = harness(t, { voice: { space: true }, protocol: false });
   await h.enable();
   h.renderWidget();
@@ -899,47 +1353,46 @@ test("noninteractive input does not retire the main prompt's recording", async (
   assert.deepEqual(h.worker.commands, [{ type: "start", id }]);
 });
 
-test("configured cancel chord is distinct from Escape and Ctrl+C", async (t) => {
-  const h = harness(t, {
-    voice: { cancelShortcut: "ctrl+alt+b", device: ":2", mode: "toggle" },
+for (const cancelShortcut of ["ctrl+alt+x", "ctrl+alt+b", null, 42]) {
+  test(`legacy cancelShortcut ${JSON.stringify(cancelShortcut)} is accepted centrally but never registered`, async (t) => {
+    const h = harness(t, {
+      voice: { cancelShortcut, device: ":2", mode: "toggle" },
+    });
+    assert.deepEqual([...h.shortcuts.keys()], [config.shortcut]);
+    assert.deepEqual(readConfig(h.configFile).voice, {
+      ...config,
+      device: ":2",
+      mode: "toggle",
+    });
+    h.editor.setText("draft");
+    await h.enable();
+    assert.equal(h.worker.callbacks.device, ":2");
+    const id = await h.record();
+    await h.input(esc);
+    assertMode(h.editor, "NORMAL");
+    assert.equal(h.controller.state, "recording");
+    for (const chord of [oldCancel, kitty("b", 7)]) {
+      assert.equal(await h.input(chord), undefined);
+      assert.equal(h.controller.state, "recording");
+    }
+    assert.equal(h.ctx.ui.getEditorText(), "draft");
+    h.renderWidget();
+    await h.input(cancel);
+    assert.equal(h.ctx.ui.getEditorText(), "");
+    assert.equal(h.controller.state, "ready");
+    assert.deepEqual(h.worker.commands, [
+      { type: "start", id },
+      { type: "cancel", id },
+    ]);
+    h.worker.emit({ type: "final", id, text: "late speech" });
+    assert.deepEqual(h.pastes, []);
   });
-  assert.equal(h.shortcuts.has("ctrl+alt+b"), true);
-  assert.equal(h.shortcuts.has(config.cancelShortcut), false);
-  h.editor.setText("draft");
-  await h.enable();
-  assert.equal(h.worker.callbacks.device, ":2");
-  const id = await h.record();
-  await h.input(esc);
-  assertMode(h.editor, "NORMAL");
-  assert.equal(h.controller.state, "recording");
-  await h.input("\x03");
-  assert.equal(
-    h.ctx.ui.getEditorText(),
-    "",
-    "Ctrl+C keeps its normal clear action",
-  );
-  assert.equal(h.controller.state, "recording");
-  await h.type("new draft");
-  await h.input(cancel);
-  assert.equal(
-    h.controller.state,
-    "recording",
-    "the old cancel chord is not reserved",
-  );
-  await h.input(kitty("b", 7));
-  assert.equal(h.controller.state, "ready");
-  assert.equal(h.ctx.ui.getEditorText(), "new draft");
-  assert.deepEqual(h.worker.commands, [
-    { type: "start", id },
-    { type: "cancel", id },
-  ]);
-});
+}
 
 test("Space tap is native typing and Escape flushes it before reaching Vim", async (t) => {
   const h = harness(t, { voice: { space: true } });
   h.editor.setText("draft");
   await h.enable();
-  t.mock.timers.enable({ apis: ["setTimeout"] });
   assert.deepEqual(await h.input(spacePress), { consume: true });
   assert.equal(h.ctx.ui.getEditorText(), "draft");
   t.mock.timers.tick(299);
@@ -957,7 +1410,6 @@ test("hold-Space starts only after the threshold and stops on release", async (t
   const h = harness(t, { voice: { space: true } });
   h.editor.setText("draft");
   await h.enable();
-  t.mock.timers.enable({ apis: ["setTimeout"] });
   await h.input(spacePress);
   t.mock.timers.tick(299);
   assert.deepEqual(h.worker.commands, []);
@@ -977,7 +1429,6 @@ test("Space in Normal passes through without a timer, text insertion or recordin
   const h = harness(t, { voice: { space: true } });
   await h.enable();
   normalAtStart(h.editor, "a b");
-  t.mock.timers.enable({ apis: ["setTimeout"] });
   assert.equal(await h.input(spacePress), undefined);
   t.mock.timers.tick(1000);
   await h.input(spaceRelease);
@@ -989,7 +1440,6 @@ test("Space in Normal passes through without a timer, text insertion or recordin
 test("missing release protocol preserves ordinary Space and advertises toggle fallback", async (t) => {
   const h = harness(t, { protocol: false, voice: { space: true } });
   await h.enable();
-  t.mock.timers.enable({ apis: ["setTimeout"] });
   await h.input(" ");
   await h.input(spacePress);
   t.mock.timers.tick(1000);
@@ -1050,7 +1500,6 @@ test("disable after renderer invalidation cancels a pending Space timer and repo
   const h = harness(t, { voice: { space: true } });
   await h.enable();
   h.renderWidget();
-  t.mock.timers.enable({ apis: ["setTimeout"] });
   await h.input(spacePress);
   h.widget.invalidate();
   await h.command("off");
@@ -1147,26 +1596,25 @@ test("VoiceKeys Escape and Ctrl+C pass through without canceling active dictatio
   assert.deepEqual(h.actions, ["start", "stop"]);
 });
 
-test("VoiceKeys honors configured recording and cancel chords only", (t) => {
-  const h = keysHarness(t, {
-    shortcut: "ctrl+alt+b",
-    cancelShortcut: "ctrl+alt+n",
-  });
+test("VoiceKeys honors only its configured recording chord and owns no cancel key", (t) => {
+  const h = keysHarness(t, { shortcut: "ctrl+alt+b" });
   assert.equal(h.input(press), undefined);
+  assert.equal(h.input(oldCancel), undefined);
   assert.equal(h.input(cancel), undefined);
   h.input(kitty("b", 7));
-  h.input(kitty("n", 7));
+  assert.equal(h.input(kitty("n", 7)), undefined);
+  assert.equal(h.input(oldCancel), undefined);
   h.input(kitty("b", 1, 3));
-  assert.deepEqual(h.actions, ["start", "cancel"]);
+  assert.deepEqual(h.actions, ["start", "stop"]);
 });
 
-test("VoiceKeys cancel discards a pending Space tap instead of flushing it", (t) => {
+test("VoiceKeys reset drops a pending Space tap without flushing it", (t) => {
   const h = keysHarness(t);
   h.input(spacePress);
-  h.input(cancel);
+  h.keys.reset();
   t.mock.timers.tick(1000);
   h.input(spaceRelease);
-  assert.deepEqual(h.actions, ["cancel"]);
+  assert.deepEqual(h.actions, []);
 });
 
 test("VoiceKeys quick Space tap emits exactly one ordinary Space", (t) => {
@@ -1254,23 +1702,26 @@ test("VoiceKeys reset clears pending tap and held shortcut without delayed effec
   assert.deepEqual(h.actions, ["start"]);
 });
 
-test("VoiceKeys ignores initial repeats and releases; cancel consumes its repeats without repeating cancellation", (t) => {
+test("VoiceKeys ignores initial repeats/releases and passes the removed chord through in every event form", (t) => {
   const h = keysHarness(t);
   h.input(repeat);
   h.input(release);
   assert.deepEqual(h.actions, []);
   h.input(press);
-  assert.deepEqual(h.input(cancel), { consume: true });
-  assert.deepEqual(h.input(kitty("x", 7, 2)), { consume: true });
-  assert.deepEqual(h.input(kitty("x", 7, 3)), { consume: true });
+  for (const event of [1, 2, 3])
+    assert.equal(h.input(kitty("x", 7, event)), undefined);
   h.input(release);
-  assert.deepEqual(h.actions, ["start", "cancel"]);
+  assert.deepEqual(h.actions, ["start", "stop"]);
 });
 
-test("VoiceKeys allows cancellation of an active capture after focus moves to a modal", (t) => {
+test("VoiceKeys leaves Ctrl+C and Escape to its caller even after focus moves to a modal", (t) => {
   const h = keysHarness(t);
   h.input(press);
   h.context.atMain = false;
-  assert.deepEqual(h.input(cancel), { consume: true });
-  assert.deepEqual(h.actions, ["start", "cancel"]);
+  for (const key of [cancel, esc, oldCancel])
+    assert.equal(h.input(key), undefined);
+  assert.deepEqual(h.actions, ["start"]);
+  h.keys.reset();
+  h.input(release);
+  assert.deepEqual(h.actions, ["start"]);
 });

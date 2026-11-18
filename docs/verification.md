@@ -56,6 +56,23 @@ Real connectors, production services, desktop applications and model calls were 
 
 ## Local voice verification
 
-Voice is exercised against Pi 1.5.2. Its automated suites use synthetic data and fake capture/model adapters. PTY tests run real Pi in regular and fullscreen modes to verify Vim-safe literal insertion, undo, Space-tap redraw and reload without microphone access.
+Voice is exercised against Pi 1.5.2. Its automated suites use synthetic data and fake capture/model adapters. Private preference tests use temporary files. Controller tests use fake timers for idle unload and queued cold capture. PTY tests run real Pi in regular and fullscreen modes to verify Vim-safe literal insertion, undo, Space-tap redraw and reload. These automated checks open no microphone and load no speech model.
 
-A separate local check transcribed synthetic English and German speech with the cached Parakeet model. The actual offline worker also reached ready and its process group shut down without starting capture. These checks do not establish real-microphone accuracy or terminal-specific physical hold/release behavior. Those remain explicit manual checks in the [Voice instructions](../extensions/voice/README.md#verification).
+```sh
+node scripts/test.mjs tests/config.test.mjs tests/voice.test.mjs tests/voice-state.test.mjs tests/voice-preferences.test.mjs tests/voice-pty.test.mjs
+npm run test:python
+npm run lint:check
+```
+
+### Explicit manual lifecycle checks
+
+After updating this implementation, fully restart Pi. Native JavaScript module caching means `/reload` alone does not load the update. Use private configuration outside the checkout. Installation should not create a Voice state preset.
+
+1. Run `/voice on` once after restarting. Confirm it saves enabled in `voice-state.json` beside the selected private config and warms only this window without capture. The default state path is `~/.config/pi-extensions/voice-state.json`. Check that `XDG_CONFIG_HOME` and `PI_EXTENSIONS_CONFIG` relocate it appropriately. It should contain only the enabled boolean and schema-version metadata.
+2. Start a new session, resume, fork, reload, open another window and restart Pi. Each saved-on session should show `standby` with no model worker or microphone. Run `/voice off` to save disabled. Already-open windows should not live-sync, but new or reloaded sessions should read the latest choice. Cleanup and errors must not erase it. Headless, RPC, SSH and unsupported environments must not launch workers.
+3. Warm Voice explicitly, then leave it ready for five idle minutes. Confirm the entire worker exits while Voice stays enabled in standby. Only with capture authorized, repeat with a pending final: keep the text in RAM after unload, then insert or cancel without restarting a model. Loading, recording and finalizing must not idle-unload.
+4. Only with microphone capture authorized, hold the recording key from standby and wait for `● recording` before talking. Release during loading and confirm capture never starts. In toggle mode, confirm a second press cancels queued capture. Confirm Ctrl+C discards queued or active speech while still reaching native editor-clear and double-press-exit handling. Escape remains unchanged. `/voice cancel` stays available without a dedicated discard key or widget hint.
+
+### Separate cached-model checks
+
+A separate local check transcribed synthetic English and German speech with the cached Parakeet model. The actual offline worker also reached ready and its process group shut down without starting capture. A local physical-footprint review used synthetic audio, not microphone capture. See [local Voice costs](performance.md#local-voice-costs) for its bounded measurements. These manual checks are separate from the model-free automated suites. They do not establish real-microphone accuracy or terminal-specific physical hold/release behavior. Those remain explicit manual checks in the [Voice instructions](../extensions/voice/README.md#verification).

@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Add opt-in local Voice dictation on macOS arm64 with live previews, native transcript paste and offline Parakeet recognition. `/voice` warms the model without opening the microphone. Hold Ctrl+Space to record. Ctrl+Alt+X still cancels.
+- Persist Voice's enabled choice privately across sessions and restarts. Restore standby without a model or microphone and unload the worker after five idle minutes. Ctrl+C discards speech while preserving native clear/exit behavior. Remove the dedicated discard shortcut and hint.
+- Add opt-in local Voice dictation on macOS arm64 with live previews, native transcript paste and offline Parakeet recognition. `/voice on` warms without opening the microphone. Hold Ctrl+Space and wait for recording before talking.
 - Add Vim `o` / `O` to open a line below / above and enter INSERT. The new line and typed text undo and redo together.
 - Stop Comms duplicates. Collectors refer to saved items by short refs and see recently closed items. A second mail or Teams ID with the same sender and timestamp folds into the saved item. Collectors can mark cross-source duplicates. Coverage reports merges and ignored refs.
 - Rank Comms by time. Items get an optional `dueAt`, anything due within 48 hours ranks as priority 1, and priority 1 now means it costs something if ignored until tomorrow. Bundled triage prepares the next working day's meetings.

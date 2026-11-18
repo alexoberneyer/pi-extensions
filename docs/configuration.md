@@ -1,6 +1,6 @@
 # Configuration
 
-Only `~/.config/pi-extensions/config.json` is discovered automatically. Keep it private. `PI_EXTENSIONS_CONFIG` selects an explicit file. Local paths support `~` and resolve relative to the selected configuration file, never a project's current directory.
+Only the user configuration is discovered automatically, normally `~/.config/pi-extensions/config.json`. `XDG_CONFIG_HOME` changes the default directory. Keep it private. `PI_EXTENSIONS_CONFIG` selects an explicit file. Local paths support `~` and resolve relative to the selected configuration file, never a project's current directory.
 
 ## Identity and communication review
 
@@ -60,7 +60,6 @@ The public default is `off`. `priority` deliberately increases usage or charges.
 {
   "voice": {
     "shortcut": "ctrl+space",
-    "cancelShortcut": "ctrl+alt+x",
     "mode": "hold",
     "space": false,
     "device": ":default"
@@ -68,11 +67,15 @@ The public default is `off`. `priority` deliberately increases usage or charges.
 }
 ```
 
-These are the defaults. There is no persisted `enabled` setting. Voice starts off in each new or reloaded session. `/voice` toggles it, and `/voice on` enables and warms the model without opening the microphone. Once ready, use the recording shortcut or `/voice start` to capture. `/voice start` from off only enables and warms.
+These are the configuration defaults. Enabled state is a separate private preference, not a `voice.enabled` configuration key. Voice is initially off unless saved on. `/voice` toggles and saves it. `/voice on` saves true and warms the current window without opening the microphone. `/voice off` saves false and stops it. The recording shortcut or `/voice start` while off also saves true and warms only, without capture.
 
-`shortcut` accepts `ctrl+space` or a lowercase `ctrl+alt+letter` binding. `cancelShortcut` remains a lowercase `ctrl+alt+letter` binding. They must differ. macOS can reserve Ctrl+Space for switching input sources. Disable that system binding or choose a supported alternative if it is active. Activation checks Pi's resolved keybindings, not operating-system or other application shortcuts. Option+Space remains available to Handy. Escape and Ctrl+C keep their normal behavior. The cancel shortcut discards only dictation, not the typed draft or Pi's running agent.
+The preference lives in `voice-state.json` beside the selected private configuration file, normally `~/.config/pi-extensions/voice-state.json`. It follows `XDG_CONFIG_HOME` or the parent of `PI_EXTENSIONS_CONFIG`. If the selected configuration is named `voice-state.json`, state uses `voice-preferences.json` instead. A preference alias to configuration is rejected. Only the enabled boolean and schema-version metadata are saved, never audio, transcripts or session data. New files use `0600`, and newly created parent directories use `0700`. Installation writes no state preset. Missing state means off. Invalid or unreadable state reports an error and leaves Voice off.
 
-`mode` accepts `hold` or `toggle`. Hold uses Kitty key-release reporting where available. Otherwise short presses toggle recording. The first shortcut press while off only enables Voice. Release finalizes a held recording. A second press finalizes a toggled recording. `/voice stop` works for either. Voice never auto-submits. Enter normally submits the existing draft and retires active dictation.
+New, resumed, forked and reloaded sessions, new windows and Pi restarts read the latest preference at `session_start`. Saved-on restores `standby` with no model worker or microphone. Already-open windows are not live-synced. Cleanup, errors and idle unload do not erase the saved choice. Headless, RPC, SSH and unsupported environments never start workers.
+
+`shortcut` accepts `ctrl+space` or a lowercase `ctrl+alt+letter` binding. The legacy `voice.cancelShortcut` key is accepted but ignored. There is no dedicated discard shortcut or widget hint. macOS can reserve Ctrl+Space for switching input sources. Disable that system binding or choose a supported alternative if it is active. Activation checks Pi's resolved keybindings, not operating-system or other application shortcuts. Option+Space remains available to Handy. Escape is unchanged. Ctrl+C discards Voice, including queued capture, while preserving Pi's native editor-clear and double-press-exit behavior. `/voice cancel` discards only dictation without changing the draft.
+
+`mode` accepts `hold` or `toggle`. Hold uses Kitty key-release reporting where available. Otherwise short presses toggle recording. From standby, a recording gesture cold-loads the model and queues capture only while still requested. Hold the key and wait for `● recording` before talking. The loading hint says to wait before speaking. Releasing before warm-ready cancels capture intent. In toggle mode, a second press cancels queued capture or finalizes an active recording. `/voice stop` also cancels queued capture or finalizes recording. Voice never auto-submits. Enter normally submits the existing draft and retires active dictation.
 
 `space` is an opt-in 300 ms hold gesture requiring Kitty release reporting. Short taps type ordinary spaces. The bundled Vim editor permits it only for literal Space in INSERT, not NORMAL commands such as `f` followed by Space. Pi's stock editor is supported. Other custom editors need an explicit `acceptsLiteralSpace` boolean getter. `/voice space on` and `/voice space off` override the setting for the current session, without enabling capture. Reload or session replacement restores the configured value.
 
@@ -80,9 +83,11 @@ These are the defaults. There is no persisted `enabled` setting. Voice starts of
 
 Voice requires macOS arm64, interactive Pi outside SSH, existing `ffmpeg` and `uv`, and cached Python 3.10, `mlx-audio==0.5.3` and `mlx-community/parakeet-tdt-0.6b-v3`. [Run the explicit one-time setup](../extensions/voice/README.md#one-time-setup) to download and cache dependencies and the model as needed. Runtime forces `--offline` and `HF_HUB_OFFLINE=1`, so `/voice` makes no model downloads or network requests.
 
-Previews stay above the editor. Final text uses native bracketed paste at the current cursor and preserves bundled Vim mode. If the draft changes or a modal has focus, the final stays pending in RAM. At the main prompt, press the recording shortcut to explicitly insert or the cancel shortcut to discard. `/voice insert`, `/voice cancel` and `/voice status` provide command equivalents.
+Previews stay above the editor. Final text uses native bracketed paste at the current cursor and preserves bundled Vim mode. If the draft changes or a modal has focus, the final stays pending in RAM. At the main prompt, press the recording shortcut or run `/voice insert` to explicitly insert. Use `/voice cancel` to discard only speech, or Ctrl+C to discard with native editor clearing. `/voice status` reports the current state. Inserting or discarding a pending final never reloads an unloaded model.
 
-Configuration changes require `/reload`, which stops the worker and discards pending speech. `/voice off`, session replacement and exit also tear it down. Each recording is capped at 60 seconds. Voice writes no audio files or transcript logs. Submitted text still follows normal Pi provider and history behavior. See [Voice](../extensions/voice/README.md) for commands, cleanup limits and explicit manual-test requirements.
+After five idle minutes in ready or pending, the entire model worker unloads. Voice stays enabled in standby, or keeps its pending final in RAM without the model. Loading, recording and finalizing do not idle-unload. Each actively used window has its own process group, not a shared server.
+
+Configuration changes require `/reload`, which stops the worker and discards pending speech before rereading the saved preference. `/voice off`, session replacement and exit also tear it down. After updating this implementation, fully restart Pi. Native JavaScript module caching means `/reload` alone is insufficient. Run `/voice on` once after the restart to save an enabled preference if needed. Each recording is capped at 60 seconds. Voice writes no audio files or transcript logs. Submitted text still follows normal Pi provider and history behavior. See [Voice](../extensions/voice/README.md) for commands, cleanup limits and explicit manual-test requirements.
 
 ## Additional protected CLIs
 

@@ -4,6 +4,14 @@ Dictate into Pi's main prompt on macOS arm64, outside SSH. Voice starts off unle
 
 No text-to-speech, always-listening mode or remote capture. Local speech recognition does not make the rest of Pi local.
 
+## Interaction demo
+
+![Voice UI with labelled simulated speech: record, preview, insert an unsent prompt, undo and redo](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/voice-demo.gif)
+
+Record → preview → final text in the prompt. One Vim undo removes the paste, redo restores it. Nothing is submitted.
+
+This is the real Voice controller and editor with a simulated worker. No microphone or speech model runs. The animation does not demonstrate recognition accuracy, model startup time or transcription latency. [Recording source and reproduction](../../docs/demo/README.md).
+
 ## One-time setup
 
 1. Install `ffmpeg` and `uv` separately and make them available on `PATH`. They are optional system dependencies, not bundled npm dependencies. Use a local interactive terminal on an Apple silicon Mac.

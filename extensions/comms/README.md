@@ -2,7 +2,9 @@
 
 A local review queue for mail, Teams, calendar and Notion ticket requests. Nothing polls on startup. Browsing saved items makes no model or connector calls.
 
-![Comms review queue with request details, actions and source coverage, shown with demo data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-demo.gif)
+![Comms reviewing an unsent draft, dismissing its request and undoing the decision, with synthetic data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-demo.gif)
+
+Review the draft → dismiss → undo. Demo decisions stay in memory. Nothing is sent or added to Reminders.
 
 ## Standalone use
 

@@ -2,13 +2,13 @@
 
 Eleven extensions for [Pi](https://github.com/earendil-works/pi). One package, with optional local integrations. Voice is exercised against Pi 1.5.2. The original ten-extension extraction was checked with Pi 1.5.0 and Node 26.8.1. Pi requires Node 22.19.0 or newer. Other Pi versions are not assumed compatible.
 
-![Agents dashboard with Pi and Claude Code sessions across three projects, shown with demo data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/agents-demo.gif)
+![Agents dashboard switching from all sessions to questions needing attention across projects, with synthetic data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/agents-demo.gif)
 
-`/agents`: Pi, Claude Code, Codex and tmux sessions in one view.
+`/agents`: find which agent needs you, across projects. Read its question without opening every session.
 
-![Comms review queue with request details, actions and source coverage, shown with demo data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-demo.gif)
+![Comms reviewing an unsent draft, dismissing its request and undoing the decision, with synthetic data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-demo.gif)
 
-`/comms demo`: requests, drafts and follow-ups in one review queue, with sample data.
+`/comms demo`: review an unsent draft, dismiss the request, undo the decision. Sample data only.
 
 ## Install
 
@@ -21,11 +21,13 @@ npm ci --ignore-scripts --legacy-peer-deps
 pi install /absolute/path/to/pi-extensions
 ```
 
-From GitHub:
+From GitHub, pinned to the feature revision shown in these demos:
 
 ```sh
-pi install git:github.com/alexoberneyer/pi-extensions@v0.1.0
+pi install git:github.com/alexoberneyer/pi-extensions@79cbc336c8f0f131dcd70aee03b1204cae02d279
 ```
+
+This revision includes Voice and the current Agents and Comms workflows. The older `v0.1.0` source tag does not include Voice. Its release page hosts the GIFs, not the demonstrated source revision.
 
 Run `/reload` in existing Pi sessions. After updating the Voice implementation, fully restart Pi instead. Its native JavaScript modules remain cached across reloads. Use `pi config` to select the extensions you want. Package filters can select individual entrypoints, for example:
 
@@ -61,6 +63,8 @@ Do not load this package alongside older copies of the same extensions. See [mig
 | [Comms](extensions/comms/README.md)             | Communication review queue, drafts and captures    | Queue tools inactive until a user action                         |
 | [Workstation](extensions/workstation/README.md) | Private memory, style, resources and hooks         | All private integrations off                                     |
 
+[Watch the Voice interaction demo](extensions/voice/README.md#interaction-demo): preview text, insert the final prompt and undo it. Speech is explicitly simulated.
+
 `workflows`, `supervisor` and `comms` initialize the bundled approval guard even when installed individually. Registration is deduplicated within the extension runtime. Unknown/broken guard configuration blocks tools rather than silently weakening protection.
 
 ## Private configuration
@@ -94,7 +98,7 @@ npm run lint:check
 npm run check:release
 ```
 
-Re-render the demo GIFs with [VHS](https://github.com/charmbracelet/vhs): run `vhs docs/demo/agents.tape` or `vhs docs/demo/comms.tape` from the repository root. They write to `/tmp` and use throwaway directories and sample data only. Review every frame, then replace the release assets with `gh release upload v0.1.0 /tmp/agents-demo.gif /tmp/comms-demo.gif --clobber`.
+Re-render the three GIFs with [VHS](https://github.com/charmbracelet/vhs). See [demo recording](docs/demo/README.md) for the tapes, isolation, frame review and approval-gated upload commands. Agents and Comms use synthetic records. Voice shows the real UI with labelled simulated speech, not a recognition benchmark.
 
 The Node test runner uses a fresh HOME, explicit environment and temporary state. It selects the installed Pi package automatically, or accepts `PI_TEST_PACKAGE_DIR`. Tests use fixture agents, local sockets and intercepted HTTP requests. They do not call a model or read your real queue, notebooks or credentials.
 

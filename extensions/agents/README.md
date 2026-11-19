@@ -2,7 +2,9 @@
 
 Run `/agents` for one view of Pi, Claude Code, Codex and tracked tmux sessions. Browsing does not call a model. External discovery runs only while the dashboard is open.
 
-![Agents dashboard with Pi and Claude Code sessions across three projects, shown with demo data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/agents-demo.gif)
+![Agents dashboard switching from all sessions to questions needing attention across projects, with synthetic data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/agents-demo.gif)
+
+All sessions → Needs you → read each agent's question. Synthetic data only.
 
 Install the package, then enable this entrypoint through `pi config`:
 

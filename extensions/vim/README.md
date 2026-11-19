@@ -17,6 +17,8 @@ interrupting Pi. Ctrl+S saves, Enter inserts a newline, and nothing is sent.
 | `o` / `O`                 | Open a blank line below / above and enter INSERT    |
 | `h` / `l`                 | Previous / next character, within the line          |
 | `j` / `k`                 | Next / previous logical line, never prompt history  |
+| `gg` / `G`                | First / last logical line, at the first nonblank    |
+| `{` / `}`                 | Previous / next paragraph boundary                  |
 | `w` / `b` / `e`           | Next word start / previous word start / word end    |
 | `0` / `$`                 | First / last character on the line                  |
 | `f` / `F` + character     | Next / previous match on the line                   |
@@ -30,8 +32,8 @@ interrupting Pi. Ctrl+S saves, Enter inserts a newline, and nothing is sent.
 | `C` / `D`                 | Change / delete to the end of the line              |
 | `{count}{command}`        | Repeat commands except `i/a/I/A/o/O`, such as `10w` |
 
-A pending count, `c`, `d`, `f`, `F`, `t` or `T` appears in the border, such
-as `2dt`. The motion selects the range. Changes enter INSERT. Deletions stay in NORMAL.
+A pending count, `c`, `d`, `f`, `F`, `t`, `T` or `g` appears in the border, such
+as `2dt` or `dg`. The motion selects the range. Changes enter INSERT. Deletions stay in NORMAL.
 `cw` on a word keeps its following spaces. `dw` also removes the following
 spacing on that line.
 
@@ -47,7 +49,18 @@ the ends of the prompt, but `2dd`, `2D` and `3$` on the last line do nothing, as
 in Vim. Counts on `i/a/I/A/o/O` are ignored instead of repeating the inserted text.
 `o/O` open an empty logical line at column zero, without copying indentation.
 
-Escape cancels a pending count, operator or search without interrupting Pi.
+`gg` and `G` address logical lines, not wrapped screen rows. `5gg` and `5G`
+both go to line five, clamped to the prompt. `G` goes to the last line, but `1G`
+goes to the first. `dgg` / `dG` delete whole lines through the first / last line,
+including the current one. After `g`, only a second `g` is supported.
+
+`{` / `}` navigate empty-line boundaries, not matching braces. Adjacent empty
+lines are skipped together. Whitespace-only lines are not boundaries. Clean
+Vim's default nroff paragraph/section macros and form feeds are boundaries too.
+A paragraph count that cannot complete cancels the entire motion. At the prompt's
+end, `}` includes the last character when used with `c` or `d`.
+
+Escape cancels a pending count, operator, search or `g` without interrupting Pi.
 Unsupported suffixes, native shortcuts and pastes also cancel it. A second
 Escape in NORMAL reaches Pi.
 
@@ -93,8 +106,9 @@ pi -e /absolute/path/to/pi-extensions/extensions/vim/index.ts
 
 Tests use the installed Pi loader and editor without credentials or model calls.
 PTY tests exercise editing and `/reload` in Pi's regular and fullscreen modes.
-When Neovim is installed, word, search, count and operator fixtures also run
-against `nvim --clean`:
+When Neovim is installed, motion, count and operator fixtures also run against
+`nvim --clean`. The `gg/G` cases set `startofline` for classic first-nonblank
+behavior, rather than Neovim 0.12's column-preserving default:
 
 ```sh
 node scripts/test.mjs tests/vim.test.mjs
@@ -107,7 +121,7 @@ npm run lint:check
   `createVimEditor` factory installs the input observer and returns its cleanup
   function for both the prompt and Comms. Extends `CustomEditor` so Pi still
   owns rendering, completion, history and application shortcuts.
-- `motions.ts`: pure `w/b/e` and `f/F/t/T` movement and word classes.
+- `motions.ts`: pure word, character-search, buffer and paragraph movement.
 - `operators.ts`: shared change/delete ranges, including counts and Vim's
   line-boundary rules.
 - `editor-port.ts`: guarded private Pi integration. Reuses native grapheme/paste
@@ -117,7 +131,7 @@ npm run lint:check
   no public pre-viewport input hook. Listeners are removed on reload, editor
   recreation and shutdown.
 
-Tested with Pi 1.5.0. After a Pi upgrade, rerun the tests. The command above
+Tested with Pi 1.5.2. After a Pi upgrade, rerun the tests. The command above
 follows the managed install's current version.
 Missing adapter methods disable Vim mode with a warning instead of blocking
 normal typing. Shape checks cannot detect every change in upstream behavior.

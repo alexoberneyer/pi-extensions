@@ -1,6 +1,8 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
+  bufferMotion,
   findChar,
+  paragraphMotion,
   wordMotion,
   wordKind,
   type Find,
@@ -27,8 +29,10 @@ export function operatorEdit(
   cursor: Position,
   operator: Operator,
   motion: string | Find,
-  count = 1,
+  count?: number,
 ): OperatorEdit | undefined {
+  // Preserve the distinction between G (last line) and 1G (first line).
+  count ??= motion === "G" ? lines.length : 1;
   const starts: number[] = [];
   let length = 0;
   for (const line of lines) {
@@ -67,7 +71,9 @@ export function operatorEdit(
     const column = visibleWidth(lines[cursor.line].slice(0, cursor.col));
     const col = keepColumn
       ? ((target ? segments[target.index] : []).findLast(
-          (item) => visibleWidth(text.slice(0, item.index)) <= column,
+          (item) =>
+            item.index === 0 ||
+            (column > 0 && visibleWidth(text.slice(0, item.index)) <= column),
         )?.index ?? 0)
       : text.match(/^[ \t]*/u)![0].length;
     return {
@@ -118,6 +124,22 @@ export function operatorEdit(
   if (motion === operator) {
     if (countedLine === undefined) return undefined;
     return wholeLines(cursor.line, countedLine, true);
+  }
+  if (motion === "gg" || motion === "G") {
+    const target = bufferMotion(segments, motion, count);
+    return wholeLines(
+      Math.min(cursor.line, target.line),
+      Math.max(cursor.line, target.line),
+    );
+  }
+  if (motion === "{" || motion === "}") {
+    const target = paragraphMotion(lines, segments, cursor, motion, count);
+    if (!target) return undefined;
+    if (motion === "{") return exclusive(target.cursor, cursor);
+    const end = target.inclusive
+      ? { line: target.cursor.line, col: lines[target.cursor.line].length }
+      : target.cursor;
+    return exclusive(cursor, end);
   }
   const line = lines[cursor.line];
   const current = units.findIndex((item) => item.index === cursor.col);

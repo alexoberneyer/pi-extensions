@@ -17,7 +17,9 @@ import {
 import { editorPort, prioritizeInput } from "./editor-port.js";
 import {
   FIND_MOTIONS,
+  bufferMotion,
   findChar,
+  paragraphMotion,
   repeatFind,
   wordMotion,
   type Find,
@@ -26,16 +28,17 @@ import {
 import { operatorEdit, type Operator } from "./operators.js";
 
 const PASTE_START = "\x1b[200~";
-// A count, an operator, a second count and a pending f/F/t/T, as in 2d3t.
-const PENDING = /^(\d*)([cd]?)(\d*)([fFtT]?)$/;
+// A count, an operator, a second count and a pending f/F/t/T/g, as in 2d3g.
+const PENDING = /^(\d*)([cd]?)(\d*)([fFtTg]?)$/;
 
 function parsePending(pending: string) {
-  const [, before, operator, after, search] = PENDING.exec(pending)!;
+  const [, before, operator, after, prefix] = PENDING.exec(pending)!;
   return {
     // Vim multiplies the counts around an operator: 2d3w deletes six words.
     count: Number(before || 1) * Number(after || 1),
+    explicitCount: !!(before || after),
     operator: (operator || undefined) as Operator | undefined,
-    search: (search || undefined) as Find["motion"] | undefined,
+    prefix: (prefix || undefined) as Find["motion"] | "g" | undefined,
   };
 }
 const PASTE_END = "\x1b[201~";
@@ -75,7 +78,7 @@ export class VimEditor extends CustomEditor {
   private bindings: KeybindingsManager;
   private pasting = false;
   private verticalColumn: number | undefined;
-  /** Typed command prefix, such as 2, d, f or 2d3t. */
+  /** Typed command prefix, such as 2, d, f or 2d3g. */
   private pending: string | undefined;
   private lastFind: Find | undefined;
   private changeDepth: number | undefined;
@@ -155,7 +158,11 @@ export class VimEditor extends CustomEditor {
     this.changeDepth = undefined;
   }
 
-  private applyOperator(operator: Operator, motion: string | Find, count = 1) {
+  private applyOperator(
+    operator: Operator,
+    motion: string | Find,
+    count?: number,
+  ) {
     const lines = this.getLines();
     const edit = operatorEdit(
       lines,
@@ -236,7 +243,7 @@ export class VimEditor extends CustomEditor {
     if (this.mode === "normal" && matchesKey(data, "ctrl+r")) {
       // A bare count repeats redo. A pending operator or search is cancelled.
       const pending = parsePending(this.pending ?? "");
-      const count = pending.operator || pending.search ? 1 : pending.count;
+      const count = pending.operator || pending.prefix ? 1 : pending.count;
       this.pending = undefined;
       this.port.cancelJump();
       for (let i = 0; i < count && this.port.redo(); i++);
@@ -395,20 +402,24 @@ export class VimEditor extends CustomEditor {
     this.tui.requestRender();
   }
 
-  // Counts and c/d wait for a motion. f/F/t/T wait for a character. Returns
-  // the count for an ordinary NORMAL key, or undefined once the key is used.
+  // Counts and c/d wait for a motion. f/F/t/T wait for a character, g for g.
+  // Return the count for an ordinary NORMAL key, or undefined once consumed.
   private prefixed(key: string): number | undefined {
     const pending = this.pending ?? "";
     this.pending = undefined;
-    const { count, operator, search } = parsePending(pending);
-    if (search) {
+    const { count, explicitCount, operator, prefix } = parsePending(pending);
+    if (prefix === "g") {
+      if (key === "g")
+        this.jump(operator, "gg", explicitCount ? count : undefined);
+    } else if (prefix) {
       // Any printable key is the target, including c, d, f or ;.
-      this.lastFind = { motion: search, char: key };
+      this.lastFind = { motion: prefix, char: key };
       this.find(operator, this.lastFind, count);
     } else if (
       /^[1-9]$/.test(key) ||
       (key === "0" && /\d$/.test(pending)) ||
       (!operator && (key === "c" || key === "d")) ||
+      key === "g" ||
       FIND_MOTIONS.includes(key)
     ) {
       // Pi rebinds registered listeners on renderer switches. Re-establish
@@ -417,12 +428,40 @@ export class VimEditor extends CustomEditor {
         this.pending = pending + key;
         this.verticalColumn = undefined;
       }
+    } else if (key === "G" || key === "{" || key === "}") {
+      this.jump(operator, key, explicitCount ? count : undefined);
     } else if (key === ";" || key === ",") {
       this.find(operator, repeatFind(this.lastFind, key), count);
     } else if (operator) {
       this.applyOperator(operator, key, count);
     } else return count;
     return undefined;
+  }
+
+  private jump(
+    operator: Operator | undefined,
+    motion: "gg" | "G" | "{" | "}",
+    count?: number,
+  ) {
+    this.verticalColumn = undefined;
+    if (operator) {
+      this.applyOperator(operator, motion, count);
+      return;
+    }
+    const lines = this.getLines();
+    const segments = lines.map((line) => this.port!.segments(line));
+    if (motion === "gg" || motion === "G") {
+      this.move(bufferMotion(segments, motion, count));
+    } else {
+      const target = paragraphMotion(
+        lines,
+        segments,
+        this.getCursor(),
+        motion,
+        count,
+      );
+      if (target) this.move(target.cursor);
+    }
   }
 
   private find(

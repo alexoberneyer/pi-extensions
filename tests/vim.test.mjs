@@ -180,6 +180,7 @@ function neovim(cases) {
       local out = {}
       for _, c in ipairs(vim.json.decode(vim.env.PI_VIM_CASES)) do
         vim.cmd('enew!')
+        if c.startofline ~= nil then vim.o.startofline = c.startofline end
         vim.api.nvim_buf_set_lines(0, 0, -1, false, c.lines)
         vim.api.nvim_win_set_cursor(0, {c.line + 1, c.bytecol})
         for _, k in ipairs(type(c.keys) == 'table' and c.keys or {c.keys}) do
@@ -969,6 +970,188 @@ test("counts show in the border, keep 0 as a motion until they start, and repeat
   assert.ok(performance.now() - started < 1000);
 });
 
+test("gg/G address logical lines and distinguish an omitted count from 1", async () => {
+  const { editor } = await harness();
+  const lines = ["  first", "middle", "", "    last", "   "];
+  for (const [command, line, col] of [
+    ["gg", 0, 2],
+    ["G", 4, 2],
+    ["1G", 0, 2],
+    ["3gg", 2, 0],
+    ["4G", 3, 4],
+    ["10gg", 4, 2],
+    ["99999999999G", 4, 2],
+  ]) {
+    normalAt(editor, lines, 1, 3);
+    keys(editor, command);
+    assert.deepEqual(editor.getCursor(), { line, col }, command);
+    assert.deepEqual(editor.getLines(), lines);
+    assertMode(editor, "NORMAL");
+  }
+  normalAt(editor, [""]);
+  keys(editor, "ggG1G");
+  assert.deepEqual(editor.getCursor(), { line: 0, col: 0 });
+  // The jump resets j/k's preferred column, including a previous $ motion.
+  normalAt(editor, ["  first", "short", "longer line"], 1, 3);
+  keys(editor, "$ggjj");
+  assert.deepEqual(editor.getCursor(), { line: 2, col: 2 });
+});
+
+test("paragraph motions skip empty runs but not whitespace or literal braces", async () => {
+  const { editor } = await harness();
+  const lines = [
+    "alpha",
+    "continued",
+    "",
+    "",
+    "  beta",
+    "   ",
+    "}",
+    "gamma",
+    "",
+    "last🙂",
+  ];
+  for (const [line, col, command, targetLine, targetCol] of [
+    [1, 3, "}", 2, 0],
+    [1, 3, "2}", 8, 0],
+    [1, 3, "3}", 9, 4],
+    [2, 0, "}", 8, 0],
+    [4, 3, "{", 3, 0],
+    [4, 3, "2{", 0, 0],
+    [9, 4, "{", 8, 0],
+    [1, 3, "99999999999}", 1, 3],
+    [4, 3, "99999999999{", 4, 3],
+  ]) {
+    normalAt(editor, lines, line, col);
+    keys(editor, command);
+    assert.deepEqual(
+      editor.getCursor(),
+      { line: targetLine, col: targetCol },
+      command,
+    );
+    assert.deepEqual(editor.getLines(), lines);
+    assertMode(editor, "NORMAL");
+  }
+  normalAt(editor, ["abc"], 0, 1);
+  keys(editor, "}");
+  assert.deepEqual(editor.getCursor(), { line: 0, col: 2 });
+  keys(editor, "{");
+  assert.deepEqual(editor.getCursor(), { line: 0, col: 0 });
+});
+
+test("g prefixes show in the border and cancel safely on Escape, suffixes, shortcuts and pastes", async () => {
+  const h = await harness();
+  const { editor } = h;
+  let interrupts = 0;
+  editor.onEscape = () => interrupts++;
+  for (const prefix of ["g", "dg", "cg", "2d3g"]) {
+    normalAt(editor, ["first", "middle", "last"], 1, 2);
+    keys(editor, prefix);
+    assert.match(mode(editor), new RegExp(`${prefix} · NORMAL`));
+    editor.handleInput(esc);
+    assert.equal(interrupts, 0);
+    assert.ok(!mode(editor).includes(" · NORMAL"));
+    assert.deepEqual(editor.getCursor(), { line: 1, col: 2 });
+    for (const suffix of ["x", "i", "d", "G", "2"]) {
+      keys(editor, prefix + suffix);
+      assert.deepEqual(editor.getLines(), ["first", "middle", "last"]);
+      assert.deepEqual(editor.getCursor(), { line: 1, col: 2 });
+      assertMode(editor, "NORMAL");
+      assert.ok(!mode(editor).includes(" · NORMAL"));
+    }
+  }
+  editor.focused = true;
+  h.input("d");
+  h.input("g");
+  h.input("\x1b[5~"); // A viewport-owned key must cancel dg before consumption.
+  h.input("g");
+  assert.deepEqual(editor.getCursor(), { line: 1, col: 2 });
+  assert.match(mode(editor), /g · NORMAL/);
+  editor.handleInput("\x06");
+  assert.ok(!mode(editor).includes(" · NORMAL"));
+  keys(editor, "dg");
+  editor.handleInput(paste("G{gg}"));
+  assert.ok(editor.getText().includes("G{gg}"));
+  assert.ok(!mode(editor).includes(" · NORMAL"));
+  normalAt(editor, ["g { } G"], 0, 0);
+  keys(editor, "fg"); // A find target g must not start a gg prefix.
+  assert.ok(!mode(editor).includes(" · NORMAL"));
+  keys(editor, "f}");
+  assert.deepEqual(editor.getCursor(), { line: 0, col: 4 });
+});
+
+test("buffer and paragraph keys decode Kitty and modifyOtherKeys terminal text", async () => {
+  const { editor } = await harness();
+  for (const encode of [
+    (key) => `\x1b[${key.codePointAt(0)}u`,
+    (key) => `\x1b[27;2;${key.codePointAt(0)}~`,
+  ]) {
+    normalAt(editor, ["  first", "", "last"], 2, 2);
+    editor.handleInput(encode("g"));
+    editor.handleInput(encode("g"));
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 2 });
+    editor.handleInput(encode("}"));
+    assert.deepEqual(editor.getCursor(), { line: 1, col: 0 });
+    editor.handleInput(encode("G"));
+    assert.deepEqual(editor.getCursor(), { line: 2, col: 0 });
+    editor.handleInput(encode("{"));
+    assert.deepEqual(editor.getCursor(), { line: 1, col: 0 });
+    editor.handleInput("\x1b[103:71;2u"); // Shift+g with alternate text G.
+    assert.deepEqual(editor.getCursor(), { line: 2, col: 0 });
+  }
+});
+
+test("new motions compose with c/d and preserve single-step undo and redo", async () => {
+  const { editor } = await harness();
+  const lines = ["  first", "", "middle", "  current", "", "last"];
+  for (const motion of ["gg", "G", "{", "}", "1G", "2gg", "2}"]) {
+    for (const operator of ["c", "d"]) {
+      normalAt(editor, lines, 3, 3);
+      keys(editor, operator + motion);
+      if (operator === "c") {
+        assertMode(editor, "INSERT");
+        keys(editor, "new text");
+        editor.handleInput(esc);
+      }
+      const changed = editor.getText();
+      assert.notEqual(changed, lines.join("\n"), operator + motion);
+      assertMode(editor, "NORMAL");
+      editor.handleInput("u");
+      assert.deepEqual(editor.getLines(), lines, operator + motion);
+      keys(editor, "ggG{}"); // Navigation must preserve the redo history.
+      editor.handleInput("\x12");
+      assert.equal(editor.getText(), changed, operator + motion);
+    }
+  }
+  normalAt(editor, ["abc"]);
+  keys(editor, "c{");
+  assertMode(editor, "INSERT");
+  keys(editor, "X");
+  editor.handleInput(esc);
+  assert.equal(editor.getText(), "Xabc");
+});
+
+test("paragraph EOF and buffer operators keep collapsed pastes atomic through undo and redo", async () => {
+  const { editor } = await harness();
+  const content = Array.from({ length: 15 }, (_, i) => `line ${i}`).join("\n");
+  editor.setText("first\n\n");
+  editor.handleInput(paste(content));
+  editor.handleInput(esc);
+  keys(editor, "0}");
+  assert.deepEqual(editor.getCursor(), { line: 2, col: 0 });
+  keys(editor, "d}");
+  assert.equal(editor.getText(), "first\n\n");
+  editor.handleInput("u");
+  assert.equal(editor.getExpandedText(), `first\n\n${content}`);
+  keys(editor, "ggcGnew");
+  editor.handleInput(esc);
+  assert.equal(editor.getText(), "new");
+  editor.handleInput("u");
+  assert.equal(editor.getExpandedText(), `first\n\n${content}`);
+  editor.handleInput("\x12");
+  assert.equal(editor.getText(), "new");
+});
+
 test("word changes keep trailing spaces and deletion consumes them", async () => {
   const { editor } = await harness();
   normalAt(editor, ["alpha beta"], 0, 4);
@@ -1544,6 +1727,39 @@ try:
     wait_for(b'gain')
     send(b'\\x01\\x0b')
     wait_for(b'INSERT')
+    send(b'\\x1b[200~top\\n\\nmiddle\\n\\nbottom\\x1b[201~')
+    wait_for(b'bottom')
+    send(b'\\x1b')
+    wait_for(b'NORMAL')
+    send(b'g')
+    wait_for('g · NORMAL'.encode())
+    send(b'giTOP-')
+    wait_for(b'TOP-top')
+    send(b'\\x1b')
+    wait_for(b'NORMAL')
+    send(b'GA-END')
+    wait_for(b'bottom-END')
+    send(b'\\x1b')
+    wait_for(b'NORMAL')
+    send(b'gg}jIMID-')
+    wait_for(b'MID-middle')
+    send(b'\\x1b')
+    wait_for(b'NORMAL')
+    send(b'G{kIBACK-')
+    wait_for(b'BACK-MID-middle')
+    send(b'\\x1b')
+    wait_for(b'NORMAL')
+    send(b'ggc}REPLACED')
+    wait_for(b'REPLACED')
+    wait_for(b'INSERT')
+    send(b'\\x1b')
+    wait_for(b'NORMAL')
+    send(b'u')
+    wait_for(b'TOP-top')
+    send(b'\\x12')
+    wait_for(b'REPLACED')
+    send(b'ggdGi')
+    wait_for(b'INSERT')
     send(b'\\x04')
     end = time.time() + 3
     while p.poll() is None and time.time() < end:
@@ -1714,6 +1930,80 @@ test("f/F/t/T, ; and , match clean Neovim, alone and with c/d", async (t) => {
     `${failures.length} failures: ${JSON.stringify(failures.slice(0, 12), null, 2)}`,
   );
   t.diagnostic(`${cases.length} find cases match clean Neovim.`);
+});
+
+test("gg/G and paragraphs match clean Neovim with counts and c/d", async (t) => {
+  if (spawnSync("nvim", ["--version"], { encoding: "utf8" }).status !== 0) {
+    t.skip("Neovim is not installed");
+    return;
+  }
+  const cases = [];
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  for (const lines of [
+    ["abc"],
+    [""],
+    ["", "", ""],
+    ["abc", "def"],
+    ["", "  next", ""],
+    ["one", "", "", "  two", "", "last"],
+    ["  one", "    ", "  ", "two", "", ""],
+    ["  one", "  two", "  last"],
+    ["{", "x", "}", "tail"],
+    ["one", "\fsection", "two", ".IP item", "three", ".SH section", "end"],
+    [".P", "one", ".PPtext", "two", ".H heading", "three", ".Pp", "tail"],
+    ["  Äpfel", "", "e\u0301x 👨‍👩‍👧‍👦", "", "last🙂"],
+    ["  head", "e\u0301"],
+    ["  head", "👨‍👩‍👧‍👦"],
+  ]) {
+    for (const [line, text] of lines.entries()) {
+      const positions = [...segmenter.segment(text)].map((item) => item.index);
+      for (const col of positions.length ? positions : [0]) {
+        for (const motion of ["gg", "G", "{", "}"]) {
+          for (const count of ["", "1", "2", "3", "10"]) {
+            for (const command of [
+              count + motion,
+              `d${count}${motion}`,
+              `${count}c${motion}X\x1b`,
+              ...(count ? [`2d${count}${motion}`] : []),
+            ]) {
+              // Pin classic first-nonblank jumps. Neovim 0.12 defaults to nostartofline.
+              cases.push({
+                lines,
+                line,
+                col,
+                keys: command,
+                startofline: motion === "gg" || motion === "G",
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  const expected = neovim(cases);
+  const { editor } = await harness();
+  const failures = [];
+  for (const [index, item] of cases.entries()) {
+    normalAt(editor, item.lines, item.line, item.col);
+    keys(editor, item.keys);
+    const result = expected[index];
+    const [line, bytecol] = result.cursor;
+    const col = Buffer.from(result.lines[line - 1])
+      .subarray(0, bytecol)
+      .toString().length;
+    const actual = { lines: editor.getLines(), cursor: editor.getCursor() };
+    const wanted = { lines: result.lines, cursor: { line: line - 1, col } };
+    if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+      failures.push({ input: item, actual, expected: wanted });
+    }
+    assertMode(editor, "NORMAL");
+  }
+  assert.equal(
+    failures.length,
+    0,
+    `${failures.length} failures: ${JSON.stringify(failures.slice(0, 12), null, 2)}`,
+  );
+  t.diagnostic(`${cases.length} buffer/paragraph cases match clean Neovim.`);
 });
 
 test("counts match clean Neovim for motions and operators", async (t) => {

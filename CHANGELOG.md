@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add Vim `gg` / `G` buffer jumps and `{` / `}` paragraph motions, with counts, change/delete operators and grouped undo/redo.
 - Persist Voice's enabled choice privately across sessions and restarts. Restore standby without a model or microphone and unload the worker after five idle minutes. Ctrl+C discards speech while preserving native clear/exit behavior. Remove the dedicated discard shortcut and hint.
 - Add opt-in local Voice dictation on macOS arm64 with live previews, native transcript paste and offline Parakeet recognition. `/voice on` warms without opening the microphone. Hold Ctrl+Space and wait for recording before talking.
 - Add Vim `o` / `O` to open a line below / above and enter INSERT. The new line and typed text undo and redo together.

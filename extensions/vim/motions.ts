@@ -47,6 +47,69 @@ export function findChar(
   return undefined;
 }
 
+// gg/G address logical lines, not wrapped rows. An omitted G count means EOF.
+export function bufferMotion(
+  lines: Segment[][],
+  motion: "gg" | "G",
+  count?: number,
+): Position {
+  const line = Math.min(
+    lines.length - 1,
+    count === undefined ? (motion === "gg" ? 0 : lines.length - 1) : count - 1,
+  );
+  return {
+    line,
+    col:
+      lines[line].find((item) => !/^[ \t]+$/u.test(item.segment))?.index ??
+      lines[line].at(-1)?.index ??
+      0,
+  };
+}
+
+// Clean Vim's paragraph/section macros, plus empty lines and form feeds.
+// Whitespace-only lines and literal braces are not paragraph boundaries.
+const PARAGRAPH =
+  /^(?:\f|\.(?:IP|LP|PP|QP|P(?: |$)|TP|HP|LI|Pp|Lp|It|pp|lp|ip|bp|SH|NH|H(?: |$)|HU|nh|sh))/;
+
+export function paragraphMotion(
+  lines: string[],
+  segments: Segment[][],
+  cursor: Position,
+  motion: "{" | "}",
+  count = 1,
+): { cursor: Position; inclusive: boolean } | undefined {
+  const direction = motion === "}" ? 1 : -1;
+  let line = cursor.line;
+  for (let remaining = count; remaining > 0; remaining--) {
+    let seenText = false;
+    let first = true;
+    for (;;) {
+      if (lines[line].length) seenText = true;
+      if (
+        !first &&
+        seenText &&
+        (!lines[line].length || PARAGRAPH.test(lines[line]))
+      )
+        break;
+      const next = line + direction;
+      if (next < 0 || next >= lines.length) {
+        // An overlarge count cancels the entire motion, not just its last step.
+        // Return here so even enormous counts take at most a prompt scan.
+        if (remaining > 1) return undefined;
+        break;
+      }
+      line = next;
+      first = false;
+    }
+  }
+  const inclusive =
+    direction > 0 && line === lines.length - 1 && !!lines[line].length;
+  return {
+    cursor: { line, col: inclusive ? (segments[line].at(-1)?.index ?? 0) : 0 },
+    inclusive,
+  };
+}
+
 export function wordKind(text: string): string {
   if (text === "") return "empty";
   if (/^\s+$/u.test(text)) return "space";

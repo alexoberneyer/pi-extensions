@@ -48,7 +48,7 @@ function isolatedHome(t) {
   return home;
 }
 
-test("the package declares eleven portable extension entrypoints with host-owned peers", () => {
+test("the package declares twelve portable extension entrypoints with host-owned peers", () => {
   assert.ok(manifest.keywords.includes("pi-package"));
   assert.deepEqual(manifest.pi.extensions, [
     "./extensions/approval/index.ts",
@@ -56,6 +56,7 @@ test("the package declares eleven portable extension entrypoints with host-owned
     "./extensions/comms/index.ts",
     "./extensions/dev01/index.ts",
     "./extensions/fast/index.ts",
+    "./extensions/polish/index.ts",
     "./extensions/supervisor/index.ts",
     "./extensions/vim/index.ts",
     "./extensions/voice/index.ts",
@@ -128,7 +129,7 @@ test("all declared extensions load and start with isolated defaults, without ext
       home,
     );
     assert.deepEqual(loaded.errors, []);
-    assert.equal(loaded.extensions.length, 11);
+    assert.equal(loaded.extensions.length, 12);
     const tools = loaded.extensions.flatMap((extension) =>
       [...extension.tools.values()].map((tool) => tool.definition ?? tool),
     );

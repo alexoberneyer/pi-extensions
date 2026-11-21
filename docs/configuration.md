@@ -89,6 +89,20 @@ After five idle minutes in ready or pending, the entire model worker unloads. Vo
 
 Configuration changes require `/reload`, which stops the worker and discards pending speech before rereading the saved preference. `/voice off`, session replacement and exit also tear it down. After updating this implementation, fully restart Pi. Native JavaScript module caching means `/reload` alone is insufficient. Run `/voice on` once after the restart to save an enabled preference if needed. Each recording is capped at 60 seconds. Voice writes no audio files or transcript logs. Submitted text still follows normal Pi provider and history behavior. See [Voice](../extensions/voice/README.md) for commands, cleanup limits and explicit manual-test requirements.
 
+## Polish
+
+```json
+{
+  "polish": {
+    "rulesFile": null,
+    "shortcut": "ctrl+alt+p",
+    "model": null
+  }
+}
+```
+
+`rulesFile` defaults to `~/.agents/skills/polish-text/rules.md`. A configured path supports `~` and resolves relative to the selected configuration file. `shortcut` accepts only a lowercase `ctrl+alt+letter` that differs from `voice.shortcut`. `model` is `null` for the session's model or `provider/model-id`. See [Polish](../extensions/polish/README.md) for behavior, failures and privacy.
+
 ## Additional protected CLIs
 
 ```json

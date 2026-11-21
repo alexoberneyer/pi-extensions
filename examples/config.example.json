@@ -17,6 +17,11 @@
     "space": false,
     "device": ":default"
   },
+  "polish": {
+    "rulesFile": null,
+    "shortcut": "ctrl+alt+p",
+    "model": null
+  },
   "approval": {
     "protectedCommands": [],
     "readCommands": []

@@ -36,6 +36,7 @@
       "./extensions/comms/index.ts",
       "./extensions/dev01/index.ts",
       "./extensions/fast/index.ts",
+      "./extensions/polish/index.ts",
       "./extensions/supervisor/index.ts",
       "./extensions/vim/index.ts",
       "./extensions/voice/index.ts",

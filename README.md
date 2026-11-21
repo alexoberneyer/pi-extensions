@@ -1,6 +1,6 @@
 # Pi extensions
 
-Eleven extensions for [Pi](https://github.com/earendil-works/pi). One package, with optional local integrations. Voice is exercised against Pi 1.5.2. The original ten-extension extraction was checked with Pi 1.5.0 and Node 26.8.1. Pi requires Node 22.19.0 or newer. Other Pi versions are not assumed compatible.
+Twelve extensions for [Pi](https://github.com/earendil-works/pi). One package, with optional local integrations. Voice is exercised against Pi 1.5.2. The original ten-extension extraction was checked with Pi 1.5.0 and Node 26.8.1. Pi requires Node 22.19.0 or newer. Other Pi versions are not assumed compatible.
 
 ![Agents dashboard switching from all sessions to questions needing attention across projects, with synthetic data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/agents-demo.gif)
 
@@ -55,6 +55,7 @@ Do not load this package alongside older copies of the same extensions. See [mig
 | [Web](extensions/web/README.md)                 | Brave search and public-page extraction            | Tools available, no requests until called                        |
 | [Fast](extensions/fast/README.md)               | Supported-provider speed tiers                     | Off for new sessions                                             |
 | [Voice](extensions/voice/README.md)             | Local microphone dictation into the prompt         | Initially off unless saved on. Restores standby without a model. |
+| [Polish](extensions/polish/README.md)           | Polish a draft in place before sending it          | No requests until `/polish` or Ctrl+Alt+P                        |
 | [Agents](extensions/agents/README.md)           | Pi, Claude, Codex and tmux dashboard               | Local Pi presence, discovery only while browsing                 |
 | [dev01](extensions/dev01/README.md)             | Explicit remote jobs and file transfers            | Disabled without a configured SSH host                           |
 | [Approval](extensions/approval/README.md)       | Confirmation and plan-mode workflow guards         | Generic guards active                                            |

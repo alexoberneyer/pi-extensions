@@ -47,7 +47,7 @@ Runtime startup forces `uv run --offline` and `HF_HUB_OFFLINE=1`. `/voice` does 
 | `/voice stop`                          | Cancel queued capture, or stop capture and request the final whole-clip transcript.                  |
 | `/voice cancel`                        | Discard dictation without changing the draft or enabled preference. Do not reload an unloaded model. |
 | `/voice insert`                        | Explicitly insert a pending final at the main prompt without loading the model.                      |
-| `/voice status`                        | Show the current state without starting capture.                                                     |
+| `/voice status`                        | Show the current state and the input for the next recording without starting capture.                |
 | `/voice space on` / `/voice space off` | Override hold-Space for this session, without enabling Voice or starting capture.                    |
 
 ## Previews and final insertion
@@ -93,7 +93,9 @@ At `session_start`, new, resumed, forked and reloaded sessions, new windows and 
 
 ### Microphone device
 
-`device` is an AVFoundation audio selector. `:default` uses the system default. An explicit index such as `:0` selects an audio device by number, not a video source. Voice never enumerates devices automatically.
+`device` is an AVFoundation audio selector. `:default` uses the system default. An explicit index such as `:0` selects an audio device by number, not a video source. Indices can change when devices connect or disconnect.
+
+`/voice status` looks up the input name on demand, even when Voice is off. It shows the input that a new recording would open now, not the route of an in-progress clip. The lookup does not open the microphone or start the model. If it cannot resolve the name, status shows `unavailable` and the configured selection.
 
 Optional device listing is a user-triggered diagnostic and can itself request microphone permission. Run this only if you want to list your devices:
 
@@ -148,7 +150,7 @@ A separate local review used the cached model and synthetic audio, not the micro
 
 An actual microphone and accuracy check needs an explicit manual test:
 
-1. Choose to allow local microphone capture, enable Voice and wait for `ready`.
+1. Run `/voice status` to check the input. With `:default`, change the input in macOS Sound settings and run it again to confirm the name updates. Then choose to allow local microphone capture, enable Voice and wait for `ready`.
 2. Record a synthetic phrase such as "This is a synthetic voice test." Stop and confirm that the microphone indicator clears, the final is accurate and nothing was submitted.
 3. Record again while editing the draft. Confirm the final stays pending, then explicitly insert or discard it at the main prompt.
 4. Run `/voice off` and confirm capture and the Voice widget are gone. Check hold/release behavior in the terminal you actually use, including optional Space only if you enable it.

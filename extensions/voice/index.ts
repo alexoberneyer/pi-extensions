@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import {
   type CustomEditor,
   type ExtensionAPI,
@@ -26,6 +27,68 @@ const voiceControl = (text: string) =>
   /^\/voice(?::[0-9]+)?(?:\s|$)/i.test(text.trimStart());
 type PromptEditor = CustomEditor & { readonly acceptsLiteralSpace?: boolean };
 type Target = { editor: PromptEditor; text: string };
+
+// AVFoundation's default can differ from the first device FFmpeg lists.
+const DEFAULT_MIC_SCRIPT = `
+ObjC.import("Foundation");
+ObjC.import("AVFoundation");
+const device = $.NSClassFromString("AVCaptureDevice").defaultDeviceWithMediaType($.AVMediaTypeAudio);
+device.isNil() ? "" : ObjC.unwrap(device.localizedName);
+`;
+
+async function resolveMicrophone(pi: ExtensionAPI, device: string) {
+  const options = { timeout: 2500, maxBuffer: 32 * 1024 };
+  let name: string | undefined;
+  try {
+    if (device === ":default") {
+      const result = await pi.exec(
+        "/usr/bin/osascript",
+        ["-l", "JavaScript", "-e", DEFAULT_MIC_SCRIPT],
+        options,
+      );
+      if (!result.killed && !result.truncated && result.code === 0)
+        name = result.stdout;
+    } else {
+      // Listing exits before opening a capture device and normally returns nonzero.
+      const result = await pi.exec(
+        "ffmpeg",
+        [
+          "-hide_banner",
+          "-nostdin",
+          "-f",
+          "avfoundation",
+          "-list_devices",
+          "true",
+          "-i",
+          "",
+        ],
+        options,
+      );
+      if (result.killed || result.truncated) return;
+      const lines = result.stderr.split(/\r?\n/);
+      const header = " AVFoundation audio devices:";
+      const start = lines.findIndex((line) => line.endsWith(header));
+      if (start === -1) return;
+      const prefix = `${lines[start].slice(0, -header.length)} `;
+      for (const line of lines.slice(start + 1)) {
+        if (!line.startsWith(prefix)) continue;
+        const entry = /^\[(\d+)\] (.+)$/.exec(line.slice(prefix.length));
+        if (entry && Number(entry[1]) === Number(device.slice(1))) {
+          name = entry[2];
+          break;
+        }
+      }
+    }
+  } catch {
+    // The lookup is best effort. Never surface raw process diagnostics in Pi.
+  }
+  return (
+    name &&
+    stripVTControlCharacters(name)
+      .replace(/\p{Cc}/gu, " ")
+      .trim()
+  );
+}
 
 export function installVoice(
   pi: ExtensionAPI,
@@ -385,12 +448,22 @@ export function installVoice(
       } else if (command === "insert") {
         refreshEditor();
         controller.insertPending(target());
-      } else if (command === "status")
+      } else if (command === "status") {
+        const device = config.device;
+        const selection = device === ":default" ? "system default" : device;
+        const name =
+          context.mode === "tui" && supported()
+            ? await resolveMicrophone(pi, device)
+            : undefined;
+        const state = controller.state;
+        const hint = ["standby", "loading", "starting"].includes(state)
+          ? " Wait for recording before speaking."
+          : "";
         context.ui.notify(
-          `Voice ${controller.state}. Standby has no model loaded. Wait for recording before speaking after a cold start.`,
+          `Voice ${state}. Next input: ${name || "unavailable"} (${selection}).${hint}`,
           "info",
         );
-      else if (command === "space on" || command === "space off") {
+      } else if (command === "space on" || command === "space off") {
         space = command === "space on";
         keyboardReporting(controller.enabled);
         render();

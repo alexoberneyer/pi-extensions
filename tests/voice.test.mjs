@@ -169,6 +169,7 @@ function harness(t, options = {}) {
   editor.focused = true;
   const baselineListeners = listeners.size;
   const pi = {
+    exec: t.mock.fn(options.exec ?? (async () => ({ code: 1 }))),
     on(name, handler) {
       const handlers = events.get(name) ?? [];
       handlers.push(handler);
@@ -398,12 +399,78 @@ test("defaults install and session startup allocate no voice resources", async (
   assert.deepEqual(h.writes, []);
   assert.deepEqual([...h.shortcuts.keys()], [config.shortcut]);
   assert.equal(existsSync(h.preferenceFile), false);
+  assert.equal(h.pi.exec.mock.callCount(), 0);
   assert.deepEqual([...h.commands.keys()], ["voice"]);
   assert.equal(
     h.commands.get("voice").getArgumentCompletions("space ").length,
     2,
   );
 });
+
+test("status resolves the current system input every time without enabling Voice", async (t) => {
+  let stdout = "Built-in Test Microphone\n";
+  const h = harness(t, { exec: async () => ({ code: 0, stdout }) });
+  await h.command("status");
+  assert.equal(
+    h.notices.at(-1).message,
+    "Voice off. Next input: Built-in Test Microphone (system default).",
+  );
+  stdout = "USB \x1b[31mDesk\x1b[0m Mic\n";
+  await h.command("status");
+  assert.match(h.notices.at(-1).message, /Next input: USB Desk Mic/);
+  assert.equal(h.pi.exec.mock.callCount(), 2);
+  const [file, args] = h.pi.exec.mock.calls[0].arguments;
+  assert.equal(file, "/usr/bin/osascript");
+  assert.match(args.at(-1), /defaultDeviceWithMediaType/);
+  assert.equal(h.workers.length, 0);
+  assert.equal(existsSync(h.preferenceFile), false);
+});
+
+for (const [device, killed, name] of [
+  [":02", false, "USB Desk Mic"],
+  [":4", false, "unavailable"],
+  [":2", true, "unavailable"],
+]) {
+  test(`status resolves numbered audio input ${device} (killed: ${killed})`, async (t) => {
+    const h = harness(t, {
+      saved: true,
+      voice: { device },
+      exec: async () => ({
+        code: 1,
+        killed,
+        stderr: [
+          "[AVFoundation indev @ 0x1] AVFoundation video devices:",
+          "[AVFoundation indev @ 0x1] [2] Test Camera",
+          "[AVFoundation indev @ 0x1] [4] Test Screen",
+          "[AVFoundation indev @ 0x1] AVFoundation audio devices:",
+          "[AVFoundation indev @ 0x1] [0] Built-in Test Microphone",
+          "[AVFoundation indev @ 0x1] [2] USB Desk Mic",
+          "Error opening input files: Input/output error",
+        ].join("\n"),
+      }),
+    });
+    await h.emit("session_start");
+    await h.command("status");
+    assert.ok(
+      h.notices
+        .at(-1)
+        .message.startsWith(`Voice standby. Next input: ${name} (${device}).`),
+    );
+    const [file, args] = h.pi.exec.mock.calls[0].arguments;
+    assert.equal(file, "ffmpeg");
+    assert.deepEqual(args.slice(-4), ["-list_devices", "true", "-i", ""]);
+    assert.equal(h.workers.length, 0);
+  });
+}
+
+for (const options of [{ supported: false }, { mode: "rpc" }]) {
+  test(`status does not query inputs outside supported interactive Pi (${JSON.stringify(options)})`, async (t) => {
+    const h = harness(t, options);
+    await h.command("status");
+    assert.match(h.notices.at(-1).message, /Next input: unavailable/);
+    assert.equal(h.pi.exec.mock.callCount(), 0);
+  });
+}
 
 for (const activation of ["command", "shortcut", "start"]) {
   test(`${activation} from off warms the worker without starting capture`, async (t) => {

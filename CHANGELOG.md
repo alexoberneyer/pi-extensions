@@ -5,6 +5,7 @@
 - Count down the final 10 seconds of each Voice recording in the widget.
 - Show the resolved input for the next recording in `/voice status` without opening the microphone.
 - Add Polish: `/polish <text>` and Ctrl+Alt+P polish a draft with one side request and put the result in the prompt, unsent. One undo restores the original. Rules come from a shared Markdown file, by default the `polish-text` skill's `rules.md`.
+- Add `yy`, `p` and clipboard cuts to the macOS Vim prompt. Ctrl+Shift+Y copies the whole draft in either mode.
 - Add Vim `gg` / `G` buffer jumps and `{` / `}` paragraph motions, with counts, change/delete operators and grouped undo/redo.
 - Persist Voice's enabled choice privately across sessions and restarts. Restore standby without a model or microphone and unload the worker after five idle minutes. Ctrl+C discards speech while preserving native clear/exit behavior. Remove the dedicated discard shortcut and hint.
 - Add opt-in local Voice dictation on macOS arm64 with live previews, native transcript paste and offline Parakeet recognition. `/voice on` warms without opening the microphone. Hold Ctrl+Space and wait for recording before talking.

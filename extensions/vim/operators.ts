@@ -16,9 +16,18 @@ export type OperatorEdit = {
   to: number;
   text: string;
   cursor: Position;
+  /** Logical lines affected by a linewise edit, independent of newline placement. */
+  lineRange?: { first: number; last: number };
   /** Vim cancelled the operator but kept the motion's cursor. */
   cancelled?: true;
 };
+
+// A line count clamps to the prompt but fails when started on its last line.
+export function lastCountedLine(line: number, last: number, count: number) {
+  return count > 1 && line === last
+    ? undefined
+    : Math.min(last, line + count - 1);
+}
 
 // Return one replacement range. Endpoints are exclusive UTF-16 offsets, always
 // on the editor's grapheme/paste-marker boundaries. Unsupported motions and
@@ -60,6 +69,7 @@ export function operatorEdit(
         to: starts[last] + lines[last].length,
         text: indent,
         cursor: { line: first, col: indent.length },
+        lineRange: { first, last },
       };
     }
     const remaining = lines
@@ -84,6 +94,7 @@ export function operatorEdit(
           : starts[last] + lines[last].length,
       text: "",
       cursor: { line, col },
+      lineRange: { first, last },
     };
   };
   // Vim's exclusive-motion rules: an end in column zero moves back to the end
@@ -105,11 +116,7 @@ export function operatorEdit(
     return span(from, to);
   };
   const lastLine = lines.length - 1;
-  // Like j, a line count clamps to the prompt but fails on its last line.
-  const countedLine =
-    count > 1 && cursor.line === lastLine
-      ? undefined
-      : Math.min(lastLine, cursor.line + count - 1);
+  const countedLine = lastCountedLine(cursor.line, lastLine, count);
   const units = segments[cursor.line];
   if (typeof motion !== "string") {
     const col = findChar(units, cursor.col, motion, count);

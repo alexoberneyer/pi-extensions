@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -13,6 +19,9 @@ const require = createRequire(join(packageDir, "package.json"));
 const { loadExtensions } = await import(
   pathToFileURL(join(packageDir, "dist/core/extensions/loader.js"))
 );
+const { createJiti } = await import(
+  pathToFileURL(join(packageDir, "dist/core/extensions/jiti-loader.js"))
+);
 const { KeybindingsManager } = await import(
   pathToFileURL(join(packageDir, "dist/core/keybindings.js"))
 );
@@ -23,6 +32,13 @@ const source = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../extensions/vim/index.ts",
 );
+const { installVim, createVimEditor } = await createJiti(import.meta.url, {
+  moduleCache: false,
+  alias: {
+    "@earendil-works/pi-coding-agent": join(packageDir, "dist/index.js"),
+    "@earendil-works/pi-tui": require.resolve("@earendil-works/pi-tui"),
+  },
+}).import(source);
 const identity = (text) => text;
 const theme = {
   borderColor: identity,
@@ -46,10 +62,21 @@ async function harness({
   existing,
   config = {},
   inputHook = true,
+  copy,
 } = {}) {
-  const loaded = await loadExtensions([source], process.cwd());
-  assert.deepEqual(loaded.errors, []);
-  assert.equal(loaded.extensions.length, 1);
+  const hooks = new Map();
+  const shortcuts = new Map();
+  const clipboard = [];
+  installVim(
+    {
+      on: (event, handler) => hooks.set(event, handler),
+      registerShortcut: (key, shortcut) => shortcuts.set(key, shortcut),
+    },
+    async (text) => {
+      await copy?.(text);
+      clipboard.push(text);
+    },
+  );
   const bindings = new KeybindingsManager(config);
   setKeybindings(bindings);
   const inputListeners = new Set([
@@ -77,14 +104,13 @@ async function harness({
       setEditorComponent: (value) => {
         factory = value;
       },
+      getEditorText: () => editor.getExpandedText(),
       notify: (message, level) => notices.push({ message, level }),
       onTerminalInput: (listener) => tui.addInputListener(listener),
     },
   };
   async function start() {
-    for (const handler of loaded.extensions[0].handlers.get("session_start")) {
-      await handler({ type: "session_start" }, ctx);
-    }
+    await hooks.get("session_start")({ type: "session_start" }, ctx);
   }
   await start();
   const create = () => factory?.(tui, theme, bindings);
@@ -95,6 +121,10 @@ async function harness({
     notices,
     start,
     ctx,
+    clipboard,
+    embedded: () =>
+      createVimEditor(tui, theme, bindings, ctx.ui.onTerminalInput, () => {}),
+    copyDraft: () => shortcuts.get("ctrl+shift+y").handler(ctx),
     inputListeners,
     input(data, view = editor) {
       for (const listener of inputListeners) {
@@ -103,11 +133,7 @@ async function harness({
       view.handleInput(data);
     },
     async shutdown() {
-      for (const handler of loaded.extensions[0].handlers.get(
-        "session_shutdown",
-      ) ?? []) {
-        await handler({ type: "session_shutdown" }, ctx);
-      }
+      await hooks.get("session_shutdown")();
     },
   };
 }
@@ -217,7 +243,7 @@ function neovim(cases) {
   return output;
 }
 
-test("real loader installs only in TUI mode and does not replace another editor", async () => {
+test("installs only in TUI mode and does not replace another editor", async () => {
   const h = await harness();
   assert.equal(h.editor.supported, true);
   assertMode(h.editor, "INSERT");
@@ -248,6 +274,149 @@ test("INSERT types normally, Escape moves left, and NORMAL ignores unsupported t
   editor.handleInput("你好");
   assert.equal(editor.getText(), "hello");
   assert.deepEqual(editor.getCursor(), { line: 0, col: 4 });
+});
+
+test("yy and counted yanks copy logical lines without moving the cursor or editing", async () => {
+  const h = await harness();
+  const { editor } = h;
+  normalAt(editor, ["top", "  middle", "bottom"], 1, 4);
+  keys(editor, "2yy");
+  await tick();
+  assert.deepEqual(h.clipboard, ["  middle\nbottom\n"]);
+  assert.deepEqual(editor.getCursor(), { line: 1, col: 4 });
+  assert.equal(editor.getText(), "top\n  middle\nbottom");
+  keys(editor, "p");
+  assert.equal(editor.getText(), "top\n  middle\n  middle\nbottom\nbottom");
+  assert.deepEqual(editor.getCursor(), { line: 2, col: 2 });
+  keys(editor, "u");
+  assert.equal(editor.getText(), "top\n  middle\nbottom");
+  editor.handleInput("\x12");
+  assert.equal(editor.getText(), "top\n  middle\n  middle\nbottom\nbottom");
+  await tick();
+  assert.deepEqual(h.clipboard, ["  middle\nbottom\n"]);
+});
+
+test("change and delete copy their range, and p puts linewise or characterwise", async () => {
+  const h = await harness();
+  const { editor } = h;
+  normalAt(editor, ["top", "  last"], 1, 2);
+  keys(editor, "ddp");
+  assert.equal(editor.getText(), "top\n  last");
+  assert.deepEqual(editor.getCursor(), { line: 1, col: 2 });
+  normalAt(editor, ["only"]);
+  keys(editor, "ddp");
+  assert.equal(editor.getText(), "only");
+  normalAt(editor, ["  change", "keep"], 0, 2);
+  keys(editor, "ccnew");
+  editor.handleInput(esc);
+  keys(editor, "p");
+  assert.equal(editor.getText(), "  new\n  change\nkeep");
+  keys(editor, "uu");
+  assert.equal(editor.getText(), "  change\nkeep");
+  normalAt(editor, ["ab🙂é"], 0, 2);
+  keys(editor, "D2p");
+  assert.equal(editor.getText(), "ab🙂é🙂é");
+  assert.deepEqual(editor.getCursor(), { line: 0, col: 7 });
+  normalAt(editor, ["ab🙂é"], 0, 2);
+  keys(editor, "Cx");
+  editor.handleInput(esc);
+  keys(editor, "p");
+  assert.equal(editor.getText(), "abx🙂é");
+  normalAt(editor, ["alpha beta"]);
+  keys(editor, "dwcw");
+  await tick();
+  assert.deepEqual(h.clipboard, [
+    "  last\n",
+    "only\n",
+    "  change\n",
+    "🙂é",
+    "🙂é",
+    "alpha ",
+    "beta",
+  ]);
+});
+
+test("copy draft uses expanded text and preserves mode, cursor and Vim register", async () => {
+  const h = await harness();
+  const { editor } = h;
+  const body = "long clipboard fixture 🙂\n".repeat(20);
+  editor.handleInput(paste(body));
+  assert.match(editor.getText(), /\[paste #\d+/);
+  const text = editor.getExpandedText();
+  assert.ok(text.startsWith(body));
+  for (const currentMode of ["INSERT", "NORMAL"]) {
+    const cursor = editor.getCursor();
+    await h.copyDraft();
+    assertMode(editor, currentMode);
+    assert.deepEqual(editor.getCursor(), cursor);
+    assert.equal(editor.getExpandedText(), text);
+    if (currentMode === "INSERT") editor.handleInput(esc);
+  }
+  keys(editor, "D");
+  assert.equal(editor.getText(), "");
+  keys(editor, "p");
+  assert.equal(editor.getExpandedText(), text);
+  await tick();
+  assert.deepEqual(h.clipboard, [text, text, text]);
+  assert.deepEqual(
+    h.notices.map((notice) => notice.message),
+    ["Draft copied.", "Draft copied."],
+  );
+  editor.setText("new draft");
+  await h.copyDraft();
+  editor.handleInput(esc);
+  keys(editor, "p");
+  assert.equal(editor.getExpandedText(), `new draft${text}`);
+});
+
+test("cancelled and empty edits, x, Backspace and the embedded editor do not write", async () => {
+  const h = await harness();
+  const { editor } = h;
+  normalAt(editor, ["hello"]);
+  keys(editor, "yy2yy2Ddfz");
+  keys(editor, "y");
+  editor.handleInput(esc);
+  keys(editor, "x2xi");
+  editor.handleInput("\x7f");
+  normalAt(editor, [""]);
+  keys(editor, "yyDC");
+  await h.copyDraft();
+  const embedded = h.embedded();
+  normalAt(embedded.editor, ["draft"]);
+  keys(embedded.editor, "yyDp");
+  assert.equal(embedded.editor.getText(), "");
+  embedded.dispose();
+  await tick();
+  assert.deepEqual(h.clipboard, ["hello\n"]);
+  assert.match(h.notices[0].message, /empty/);
+});
+
+test("clipboard writes stay ordered and failure does not prevent editing or paste", async () => {
+  let release;
+  const wait = new Promise((done) => {
+    release = done;
+  });
+  const attempts = [];
+  const h = await harness({
+    async copy(text) {
+      attempts.push(text);
+      if (attempts.length === 1) {
+        await wait;
+        throw new Error("Fixture clipboard failed");
+      }
+    },
+  });
+  const { editor } = h;
+  normalAt(editor, ["first", "second"]);
+  keys(editor, "yyjDp");
+  assert.equal(editor.getText(), "first\nsecond");
+  await tick();
+  assert.deepEqual(attempts, ["first\n"]);
+  release();
+  await h.shutdown();
+  assert.deepEqual(attempts, ["first\n", "second"]);
+  assert.deepEqual(h.clipboard, ["second"]);
+  assert.match(h.notices[0].message, /could not copy/);
 });
 
 test("h/l and 0/$ stay on characters and never cross a line", async () => {
@@ -743,6 +912,10 @@ test("package manifest declares the Vim entrypoint and it loads standalone outsi
   assert.deepEqual(loaded.errors, []);
   assert.equal(loaded.extensions.length, 1);
   assert.ok(loaded.extensions[0].handlers.has("session_start"));
+  assert.equal(
+    loaded.extensions[0].shortcuts.has("ctrl+shift+y"),
+    process.platform === "darwin",
+  );
 });
 
 test("c/d wait for a motion, show it in the border, and Escape cancels without interrupting", async () => {
@@ -1622,7 +1795,7 @@ test("change/delete/open-line results and cursors match clean Neovim", async (t)
 
 for (const tuiMode of ["regular", "fullscreen"]) {
   test(
-    `real Pi PTY ${tuiMode} changes, deletes, opens lines, undoes, redoes and reloads the Vim editor`,
+    `real Pi PTY ${tuiMode} exercises Vim editing, clipboard shortcuts and reload`,
     {
       skip:
         process.platform === "win32" ||
@@ -1633,6 +1806,18 @@ for (const tuiMode of ["regular", "fullscreen"]) {
       const home = mkdtempSync(join(tmpdir(), "pi-vim-pty-"));
       t.after(() => rmSync(home, { recursive: true, force: true }));
       mkdirSync(join(home, "agent"));
+      const entry = join(home, "clipboard-fixture.ts");
+      const clipboard = join(home, "clipboard.jsonl");
+      writeFileSync(
+        entry,
+        `
+        import { appendFileSync } from "node:fs";
+        import { installVim } from ${JSON.stringify(source)};
+        export default (pi) => installVim(pi, async (text) => {
+          appendFileSync(${JSON.stringify(clipboard)}, JSON.stringify(text) + "\\n");
+        });
+      `,
+      );
       const script = `import os, pty, select, subprocess, sys, time, json, fcntl, termios, struct, re
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
@@ -1652,12 +1837,30 @@ def send(text):
     global data
     data = b''
     os.write(master, text)
+def wait_for_clipboard(expected):
+    end = time.time() + 6
+    actual = []
+    while actual != expected:
+        if time.time() > end: raise RuntimeError('clipboard entries: '+repr(actual))
+        if os.path.isfile('clipboard.jsonl'):
+            with open('clipboard.jsonl') as f: actual = list(map(json.loads, f))
+        time.sleep(.01)
+copy_draft = b'\\x1b[121;6u'
 try:
     wait_for(b'INSERT')
     send(b'hello')
     wait_for(b'hello')
+    send(copy_draft)
+    wait_for(b'Draft copied.')
+    wait_for_clipboard(['hello'])
     send(b'\\x1b')
     wait_for(b'NORMAL')
+    send(b'y')
+    wait_for('y · NORMAL'.encode())
+    send(b'y')
+    wait_for(b'NORMAL')
+    send(copy_draft)
+    wait_for_clipboard(['hello', 'hello\\n', 'hello'])
     send(b'0lxiX')
     wait_for(b'hXllo')
     wait_for(b'INSERT')
@@ -1784,7 +1987,7 @@ finally:
           "--no-session",
           "--no-extensions",
           "--extension",
-          source,
+          entry,
           "--no-mcp",
           "--no-skills",
           "--no-prompt-templates",

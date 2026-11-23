@@ -28,6 +28,7 @@ type Internals = {
   onChange?: (text: string) => void;
   pushUndoSnapshot(): void;
   exitHistoryBrowsing(): void;
+  expandPasteMarkers(text: string): string;
   setCursorCol(col: number): void;
   segment(text: string, granularity: "grapheme"): Iterable<Segment>;
   cancelAutocomplete(): void;
@@ -58,6 +59,7 @@ function createEditorPort(editor: CustomEditor) {
       "handleForwardDelete",
       "pushUndoSnapshot",
       "exitHistoryBrowsing",
+      "expandPasteMarkers",
       "undo",
     ].every((name) => typeof e[name as keyof Internals] === "function")
   ) {
@@ -94,6 +96,7 @@ function createEditorPort(editor: CustomEditor) {
   return {
     clearRedo,
     segments: (text: string) => [...e.segment(text, "grapheme")],
+    expand: (text: string) => e.expandPasteMarkers(text),
     undoDepth: () => e.undoStack.length,
     collapseUndo(depth: number) {
       while (e.undoStack.length > depth + 1) e.undoStack.pop();

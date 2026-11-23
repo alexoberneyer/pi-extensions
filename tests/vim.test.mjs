@@ -336,6 +336,99 @@ test("change and delete copy their range, and p puts linewise or characterwise",
   ]);
 });
 
+test("ciw and yiw act on the whole word without touching neighboring text", async () => {
+  const h = await harness();
+  const { editor } = h;
+  normalAt(editor, ["first alpha beta"], 0, 8);
+  const depth = editor.port.undoDepth();
+  keys(editor, "yiw");
+  assert.equal(editor.getText(), "first alpha beta");
+  assert.deepEqual(editor.getCursor(), { line: 0, col: 6 });
+  assert.equal(editor.port.undoDepth(), depth);
+  assertMode(editor, "NORMAL");
+  keys(editor, "$p");
+  assert.equal(editor.getText(), "first alpha betaalpha");
+  keys(editor, "u0wllciw");
+  assert.equal(editor.getText(), "first  beta");
+  assert.deepEqual(editor.getCursor(), { line: 0, col: 6 });
+  assertMode(editor, "INSERT");
+  keys(editor, "new");
+  editor.handleInput(esc);
+  assert.equal(editor.getText(), "first new beta");
+  keys(editor, "u");
+  assert.equal(editor.getText(), "first alpha beta");
+  editor.handleInput("\x12");
+  assert.equal(editor.getText(), "first new beta");
+  await tick();
+  assert.deepEqual(h.clipboard, ["alpha", "alpha"]);
+});
+
+test("inner-word shares Vim word classes, handles counts and expands paste markers", async () => {
+  const h = await harness();
+  const { editor } = h;
+  normalAt(editor, ["a cafe\u0301!!  end"], 0, 4);
+  keys(editor, "yiw");
+  normalAt(editor, ["alpha!!beta"], 0, 6);
+  keys(editor, "ciw");
+  assert.equal(editor.getText(), "alphabeta");
+  normalAt(editor, ["alpha  beta"], 0, 6);
+  keys(editor, "yiw");
+  normalAt(editor, ["alpha beta!"], 0, 2);
+  keys(editor, "c3iw");
+  assert.equal(editor.getText(), "!");
+  editor.setText("");
+  const body = "clipboard fixture\n".repeat(20);
+  editor.handleInput(paste(body));
+  assert.match(editor.getText(), /\[paste #\d+/);
+  editor.handleInput(esc);
+  keys(editor, "yiwciw");
+  assert.equal(editor.getText(), "");
+  editor.handleInput(esc);
+  keys(editor, "u");
+  assert.equal(editor.getExpandedText(), body);
+  await tick();
+  assert.deepEqual(h.clipboard, [
+    "cafe\u0301",
+    "!!",
+    "  ",
+    "alpha beta",
+    body,
+    body,
+  ]);
+});
+
+test("inner-word prefixes cancel without editing or copying", async () => {
+  const h = await harness();
+  const { editor } = h;
+  editor.focused = true;
+  let interrupts = 0;
+  editor.onEscape = () => interrupts++;
+  for (const prefix of ["ci", "yi"]) {
+    normalAt(editor, ["alpha", "beta"], 0, 2);
+    keys(editor, prefix);
+    assert.match(mode(editor), new RegExp(`${prefix} · NORMAL`));
+    h.input(esc);
+    assert.equal(interrupts, 0);
+    assert.doesNotMatch(mode(editor), / · NORMAL/);
+    keys(editor, prefix);
+    h.input("\x1b[5~");
+    keys(editor, "w");
+    assert.equal(editor.getText(), "alpha\nbeta");
+    assertMode(editor, "NORMAL");
+  }
+  for (const command of ["2ciw", "2yiw", "cix", "yix", "yw", "yG"]) {
+    normalAt(editor, ["alpha", "beta"], 0, 2);
+    keys(editor, command);
+    assert.equal(editor.getText(), "alpha\nbeta", command);
+    assertMode(editor, "NORMAL");
+  }
+  normalAt(editor, [""]);
+  keys(editor, "yiwciw");
+  assertMode(editor, "NORMAL");
+  await tick();
+  assert.deepEqual(h.clipboard, []);
+});
+
 test("copy draft uses expanded text and preserves mode, cursor and Vim register", async () => {
   const h = await harness();
   const { editor } = h;
@@ -945,7 +1038,7 @@ test("unsupported operator suffixes and native shortcuts cancel instead of delet
   for (const command of [
     "cj",
     "dk",
-    "ci",
+    "ciq",
     "da",
     "dx",
     "cd",
@@ -1861,6 +1954,20 @@ try:
     wait_for(b'NORMAL')
     send(copy_draft)
     wait_for_clipboard(['hello', 'hello\\n', 'hello'])
+    send(b'0llyi')
+    wait_for('yi · NORMAL'.encode())
+    send(b'w')
+    wait_for_clipboard(['hello', 'hello\\n', 'hello', 'hello'])
+    send(b'llci')
+    wait_for('ci · NORMAL'.encode())
+    send(b'wUPDATED')
+    wait_for(b'UPDATED')
+    wait_for(b'INSERT')
+    wait_for_clipboard(['hello', 'hello\\n', 'hello', 'hello', 'hello'])
+    send(b'\\x1b')
+    wait_for(b'NORMAL')
+    send(b'u')
+    wait_for(b'hello')
     send(b'0lxiX')
     wait_for(b'hXllo')
     wait_for(b'INSERT')

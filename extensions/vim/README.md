@@ -28,16 +28,21 @@ interrupting Pi. Ctrl+S saves, Enter inserts a newline, and nothing is sent.
 | `u`                       | Undo the last edit                                  |
 | `Ctrl+R`                  | Redo the last undone edit                           |
 | `c{motion}` / `d{motion}` | Change / delete with any motion above but `j/k`     |
+| `ciw` / `yiw`             | Change / copy the whole word under the cursor       |
 | `cc` / `dd`               | Change the line with indentation / delete the line  |
 | `C` / `D`                 | Change / delete to the end of the line              |
 | `yy`                      | Copy the current logical line (Mac prompt)          |
 | `p`                       | Paste the last Vim copy or cut (Mac prompt)         |
 | `{count}{command}`        | Repeat commands except `i/a/I/A/o/O`, such as `10w` |
 
-A pending count, `c`, `d`, `f`, `F`, `t`, `T`, `g` or `y` appears in the border, such
-as `2dt` or `dg`. The motion selects the range. Changes enter INSERT. Deletions stay in NORMAL.
+Pending commands appear in the border, such as `2dt`, `dg` or `ci`. The motion
+or text object selects the range. Changes enter INSERT. Deletions stay in NORMAL.
 `cw` on a word keeps its following spaces. `dw` also removes the following
 spacing on that line.
+
+`ciw` changes the whole word even when the cursor is in the middle. On
+punctuation or whitespace, `iw` selects just that run. Counts stay on the
+same logical line and count intervening whitespace as a run.
 
 The key after `f/F/t/T` is always the target, even `c` or `;`. Searches stay on
 the line, unlike Pi's own `Ctrl+]` jump. A missing target cancels the command:
@@ -86,8 +91,9 @@ Each deletion is one step. Plain INSERT typing keeps Pi's native grouping.
 **Ctrl+Shift+Y** copies the whole prompt in either mode, without moving the
 cursor or sending. Text behind collapsed paste markers is included.
 
-`yy` copies a logical line to the clipboard. Use `3yy` for three lines. `C`, `D`,
-`cc`, `dd` and `c` / `d` with motions also copy the affected text. A linewise copy
+`yy` copies a logical line to the clipboard. Use `3yy` for three lines. `yiw`
+copies the whole word and moves the cursor to its start without editing the draft.
+`ciw`, `C`, `D`, `cc`, `dd` and `c` / `d` with motions also copy the affected text. A linewise copy
 includes a trailing newline. `x`, native deletions, cancelled edits and undo do
 not change the clipboard.
 
@@ -106,7 +112,7 @@ Motions and mode changes without typing keep it. INSERT shortcuts stay with Pi.
 Redo history is local to the current editor; reload clears it. This is a linear
 history, not Vim's undo tree.
 
-No text objects (`ciw`, `di"`), Visual mode, repeat (`.`), search, macros, Ex
+No other text objects (such as `di"`), Visual mode, repeat (`.`), search, macros, Ex
 commands or key-remapping configuration. Word classes follow common
 clean-Vim defaults, not a custom Neovim `iskeyword` configuration.
 

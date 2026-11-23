@@ -27,13 +27,13 @@ import {
   type Find,
   type Position,
 } from "./motions.js";
-import { lastCountedLine, operatorEdit, type Operator } from "./operators.js";
+import { operatorEdit, type Operator } from "./operators.js";
 
 const PASTE_START = "\x1b[200~";
 const COPY_DRAFT = "ctrl+shift+y";
 const MAX_REPEAT_PASTE_CHARS = 10_000_000;
-// A count, an operator, a second count and a pending f/F/t/T/g/y, as in 2d3g.
-const PENDING = /^(\d*)([cd]?)(\d*)([fFtTgy]?)$/;
+// A count, an operator, a second count and a motion/object prefix, as in 2d3g.
+const PENDING = /^(\d*)([cdy]?)(\d*)([fFtTgi]?)$/;
 type Register = { text: string; linewise: boolean };
 
 function lineOffset(lines: string[], line: number) {
@@ -47,7 +47,7 @@ function parsePending(pending: string) {
     count: Number(before || 1) * Number(after || 1),
     explicitCount: !!(before || after),
     operator: (operator || undefined) as Operator | undefined,
-    prefix: (prefix || undefined) as Find["motion"] | "g" | "y" | undefined,
+    prefix: (prefix || undefined) as Find["motion"] | "g" | "i" | undefined,
   };
 }
 const PASTE_END = "\x1b[201~";
@@ -180,14 +180,6 @@ export class VimEditor extends CustomEditor {
     this.copyText(linewise ? `${expanded}\n` : expanded);
   }
 
-  private yankLines(count: number) {
-    const lines = this.getLines();
-    const { line } = this.getCursor();
-    const last = lastCountedLine(line, lines.length - 1, count);
-    if (last !== undefined && (lines.length > 1 || lines[0]))
-      this.yank(lines.slice(line, last + 1).join("\n"), true);
-  }
-
   private put(count: number) {
     if (!this.register) return;
     const { text, linewise } = this.register;
@@ -246,7 +238,7 @@ export class VimEditor extends CustomEditor {
       count,
     );
     if (edit?.cancelled) this.move(edit.cursor);
-    if (!edit || edit.cancelled || (operator === "d" && edit.from === edit.to))
+    if (!edit || edit.cancelled || (operator !== "c" && edit.from === edit.to))
       return;
     if (this.copyText && recordCut && edit.from !== edit.to) {
       const removed = this.getText().slice(edit.from, edit.to);
@@ -256,6 +248,10 @@ export class VimEditor extends CustomEditor {
           range ? lines.slice(range.first, range.last + 1).join("\n") : removed,
           !!range,
         );
+    }
+    if (operator === "y") {
+      if (!edit.lineRange) this.move(edit.cursor);
+      return;
     }
     const depth = this.port!.undoDepth();
     this.port!.replace(edit);
@@ -485,7 +481,7 @@ export class VimEditor extends CustomEditor {
     this.tui.requestRender();
   }
 
-  // Counts and c/d wait for a motion. f/F/t/T wait for a character, g/y for g/y.
+  // Operators wait for a motion or object. f/F/t/T wait for a character.
   // Return the count for an ordinary NORMAL key, or undefined once consumed.
   private prefixed(key: string): number | undefined {
     const pending = this.pending ?? "";
@@ -494,8 +490,8 @@ export class VimEditor extends CustomEditor {
     if (prefix === "g") {
       if (key === "g")
         this.jump(operator, "gg", explicitCount ? count : undefined);
-    } else if (prefix === "y") {
-      if (key === "y") this.yankLines(count);
+    } else if (prefix === "i") {
+      if (operator && key === "w") this.applyOperator(operator, "iw", count);
     } else if (prefix) {
       // Any printable key is the target, including c, d, f or ;.
       this.lastFind = { motion: prefix, char: key };
@@ -505,8 +501,8 @@ export class VimEditor extends CustomEditor {
       (key === "0" && /\d$/.test(pending)) ||
       (!operator &&
         (key === "c" || key === "d" || (key === "y" && this.copyText))) ||
-      key === "g" ||
-      FIND_MOTIONS.includes(key)
+      (key === "i" && (operator === "c" || operator === "y")) ||
+      (operator !== "y" && (key === "g" || FIND_MOTIONS.includes(key)))
     ) {
       // Pi rebinds registered listeners on renderer switches. Re-establish
       // priority here, after listener dispatch, before arming a new prefix.
@@ -514,6 +510,8 @@ export class VimEditor extends CustomEditor {
         this.pending = pending + key;
         this.verticalColumn = undefined;
       }
+    } else if (operator === "y") {
+      if (key === "y") this.applyOperator(operator, key, count);
     } else if (key === "G" || key === "{" || key === "}") {
       this.jump(operator, key, explicitCount ? count : undefined);
     } else if (key === ";" || key === ",") {

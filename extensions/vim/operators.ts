@@ -10,7 +10,7 @@ import {
   type Segment,
 } from "./motions.js";
 
-export type Operator = "c" | "d";
+export type Operator = "c" | "d" | "y";
 export type OperatorEdit = {
   from: number;
   to: number;
@@ -23,15 +23,14 @@ export type OperatorEdit = {
 };
 
 // A line count clamps to the prompt but fails when started on its last line.
-export function lastCountedLine(line: number, last: number, count: number) {
+function lastCountedLine(line: number, last: number, count: number) {
   return count > 1 && line === last
     ? undefined
     : Math.min(last, line + count - 1);
 }
 
-// Return one replacement range. Endpoints are exclusive UTF-16 offsets, always
-// on the editor's grapheme/paste-marker boundaries. Unsupported motions and
-// failed counts cancel.
+// Return the operator's range and, for c/d, its replacement. The end offset
+// is exclusive. Both offsets stay on grapheme/paste-marker boundaries.
 export function operatorEdit(
   lines: string[],
   segments: Segment[][],
@@ -118,6 +117,26 @@ export function operatorEdit(
   const lastLine = lines.length - 1;
   const countedLine = lastCountedLine(cursor.line, lastLine, count);
   const units = segments[cursor.line];
+  if (motion === "iw") {
+    const current = units.findIndex((unit) => unit.index === cursor.col);
+    if (current < 0) return undefined;
+    const kindAt = (index: number) => wordKind(units[index].segment);
+    const currentKind = kindAt(current);
+    let first = current;
+    while (first > 0 && kindAt(first - 1) === currentKind) first--;
+    let end = current;
+    // A count includes intervening whitespace as its own run, like Vim.
+    // Restrict the object to this logical line.
+    for (let remaining = count; remaining > 0; remaining--) {
+      if (end === units.length) return undefined;
+      const kind = kindAt(end++);
+      while (end < units.length && kindAt(end) === kind) end++;
+    }
+    return span(
+      { ...cursor, col: units[first].index },
+      { ...cursor, col: units[end]?.index ?? lines[cursor.line].length },
+    );
+  }
   if (typeof motion !== "string") {
     const col = findChar(units, cursor.col, motion, count);
     if (col === undefined) return undefined;

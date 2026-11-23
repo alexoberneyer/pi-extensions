@@ -1,6 +1,8 @@
 import {
+  copyToClipboard,
   CustomEditor,
   type ExtensionAPI,
+  type ExtensionContext,
   type ExtensionUIContext,
   type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -25,11 +27,18 @@ import {
   type Find,
   type Position,
 } from "./motions.js";
-import { operatorEdit, type Operator } from "./operators.js";
+import { lastCountedLine, operatorEdit, type Operator } from "./operators.js";
 
 const PASTE_START = "\x1b[200~";
-// A count, an operator, a second count and a pending f/F/t/T/g, as in 2d3g.
-const PENDING = /^(\d*)([cd]?)(\d*)([fFtTg]?)$/;
+const COPY_DRAFT = "ctrl+shift+y";
+const MAX_REPEAT_PASTE_CHARS = 10_000_000;
+// A count, an operator, a second count and a pending f/F/t/T/g/y, as in 2d3g.
+const PENDING = /^(\d*)([cd]?)(\d*)([fFtTgy]?)$/;
+type Register = { text: string; linewise: boolean };
+
+function lineOffset(lines: string[], line: number) {
+  return lines.slice(0, line).reduce((sum, text) => sum + text.length + 1, 0);
+}
 
 function parsePending(pending: string) {
   const [, before, operator, after, prefix] = PENDING.exec(pending)!;
@@ -38,7 +47,7 @@ function parsePending(pending: string) {
     count: Number(before || 1) * Number(after || 1),
     explicitCount: !!(before || after),
     operator: (operator || undefined) as Operator | undefined,
-    prefix: (prefix || undefined) as Find["motion"] | "g" | undefined,
+    prefix: (prefix || undefined) as Find["motion"] | "g" | "y" | undefined,
   };
 }
 const PASTE_END = "\x1b[201~";
@@ -83,8 +92,14 @@ export class VimEditor extends CustomEditor {
   private lastFind: Find | undefined;
   private changeDepth: number | undefined;
   private viewportActions: string[];
+  private register: Register | undefined;
 
-  constructor(tui: TUI, theme: EditorTheme, bindings: KeybindingsManager) {
+  constructor(
+    tui: TUI,
+    theme: EditorTheme,
+    bindings: KeybindingsManager,
+    private readonly copyText?: (text: string) => void,
+  ) {
     super(tui, theme, bindings, { embedWorkingStatus: true });
     this.bindings = bindings;
     this.port = editorPort(this);
@@ -158,10 +173,68 @@ export class VimEditor extends CustomEditor {
     this.changeDepth = undefined;
   }
 
+  private yank(text: string, linewise: boolean) {
+    if (!this.copyText || (!linewise && !text)) return;
+    const expanded = this.port!.expand(text);
+    this.register = { text: expanded, linewise };
+    this.copyText(linewise ? `${expanded}\n` : expanded);
+  }
+
+  private yankLines(count: number) {
+    const lines = this.getLines();
+    const { line } = this.getCursor();
+    const last = lastCountedLine(line, lines.length - 1, count);
+    if (last !== undefined && (lines.length > 1 || lines[0]))
+      this.yank(lines.slice(line, last + 1).join("\n"), true);
+  }
+
+  private put(count: number) {
+    if (!this.register) return;
+    const { text, linewise } = this.register;
+    const unit = linewise ? `${text}\n` : text;
+    if (count > 1 && unit.length * count > MAX_REPEAT_PASTE_CHARS) return;
+    const repeated = unit.repeat(count);
+    const lines = this.getLines();
+    const { line, col } = this.getCursor();
+    const lineStart = lineOffset(lines, line);
+    if (linewise) {
+      const empty = lines.length === 1 && !lines[0];
+      const insertAt = lineStart + lines[line].length;
+      this.port!.replace({
+        from: insertAt,
+        to: insertAt,
+        text: (empty ? "" : "\n") + repeated.slice(0, -1),
+        cursor: {
+          line: empty ? 0 : line + 1,
+          col: /^[ \t]*/u.exec(text)![0].length,
+        },
+      });
+    } else {
+      const segment = this.segments().find((item) => item.index === col);
+      const after = col + (segment?.segment.length ?? 0);
+      const insertAt = lineStart + after;
+      this.port!.replace({
+        from: insertAt,
+        to: insertAt,
+        text: repeated,
+        cursor: {
+          line,
+          col:
+            after +
+            (repeated.includes("\n")
+              ? 0
+              : this.port!.segments(repeated).at(-1)!.index),
+        },
+      });
+    }
+    this.clampNormalCursor();
+  }
+
   private applyOperator(
     operator: Operator,
     motion: string | Find,
     count?: number,
+    recordCut = true,
   ) {
     const lines = this.getLines();
     const edit = operatorEdit(
@@ -175,6 +248,15 @@ export class VimEditor extends CustomEditor {
     if (edit?.cancelled) this.move(edit.cursor);
     if (!edit || edit.cancelled || (operator === "d" && edit.from === edit.to))
       return;
+    if (this.copyText && recordCut && edit.from !== edit.to) {
+      const removed = this.getText().slice(edit.from, edit.to);
+      const range = edit.lineRange;
+      if (removed !== edit.text)
+        this.yank(
+          range ? lines.slice(range.first, range.last + 1).join("\n") : removed,
+          !!range,
+        );
+    }
     const depth = this.port!.undoDepth();
     this.port!.replace(edit);
     this.verticalColumn = undefined;
@@ -330,9 +412,7 @@ export class VimEditor extends CustomEditor {
         const lines = this.getLines();
         const below = key === "o";
         const offset =
-          lines
-            .slice(0, cursor.line)
-            .reduce((sum, line) => sum + line.length + 1, 0) +
+          lineOffset(lines, cursor.line) +
           (below ? lines[cursor.line].length : 0);
         const depth = this.port.undoDepth();
         this.port.replace({
@@ -387,8 +467,11 @@ export class VimEditor extends CustomEditor {
       case "D":
         this.applyOperator(key === "C" ? "c" : "d", "$", count);
         break;
+      case "p":
+        this.put(count);
+        break;
       case "x":
-        if (count > 1) this.applyOperator("d", "l", count);
+        if (count > 1) this.applyOperator("d", "l", count, false);
         else if (segments.length) this.port.deleteCharacter();
         this.clampNormalCursor();
         break;
@@ -402,7 +485,7 @@ export class VimEditor extends CustomEditor {
     this.tui.requestRender();
   }
 
-  // Counts and c/d wait for a motion. f/F/t/T wait for a character, g for g.
+  // Counts and c/d wait for a motion. f/F/t/T wait for a character, g/y for g/y.
   // Return the count for an ordinary NORMAL key, or undefined once consumed.
   private prefixed(key: string): number | undefined {
     const pending = this.pending ?? "";
@@ -411,6 +494,8 @@ export class VimEditor extends CustomEditor {
     if (prefix === "g") {
       if (key === "g")
         this.jump(operator, "gg", explicitCount ? count : undefined);
+    } else if (prefix === "y") {
+      if (key === "y") this.yankLines(count);
     } else if (prefix) {
       // Any printable key is the target, including c, d, f or ;.
       this.lastFind = { motion: prefix, char: key };
@@ -418,7 +503,8 @@ export class VimEditor extends CustomEditor {
     } else if (
       /^[1-9]$/.test(key) ||
       (key === "0" && /\d$/.test(pending)) ||
-      (!operator && (key === "c" || key === "d")) ||
+      (!operator &&
+        (key === "c" || key === "d" || (key === "y" && this.copyText))) ||
       key === "g" ||
       FIND_MOTIONS.includes(key)
     ) {
@@ -508,8 +594,9 @@ export function createVimEditor(
   bindings: KeybindingsManager,
   onTerminalInput: ExtensionUIContext["onTerminalInput"] | undefined,
   onNormalEscape?: () => void,
+  copyText?: (text: string) => void,
 ): { editor: CustomEditor; vimEnabled: boolean; dispose: () => void } {
-  const editor = new VimEditor(tui, theme, bindings);
+  const editor = new VimEditor(tui, theme, bindings, copyText);
   editor.onNormalEscape = onNormalEscape;
   let stopInput: (() => void) | undefined;
   const dispose = () => {
@@ -532,16 +619,49 @@ export function createVimEditor(
   };
 }
 
-export default function (pi: ExtensionAPI) {
+export function installVim(
+  pi: ExtensionAPI,
+  copy = process.platform === "darwin" ? copyToClipboard : undefined,
+) {
   let factory: ReturnType<ExtensionUIContext["getEditorComponent"]>;
   let stopInput: (() => void) | undefined;
-  pi.on("session_shutdown", () => {
+  let vimEnabled = false;
+  let pendingCopy = Promise.resolve();
+
+  function enqueueCopy(text: string, ctx: ExtensionContext, announce = false) {
+    // Preserve clipboard order even if Pi falls back to an async platform command.
+    pendingCopy = pendingCopy.then(async () => {
+      try {
+        await copy!(text);
+        if (announce) ctx.ui.notify("Draft copied.", "info");
+      } catch {
+        ctx.ui.notify("Vim: could not copy to the clipboard.", "warning");
+      }
+    });
+    return pendingCopy;
+  }
+
+  if (copy) {
+    pi.registerShortcut(COPY_DRAFT, {
+      description: "Copy the whole Vim prompt to the clipboard",
+      async handler(ctx) {
+        if (ctx.mode !== "tui" || !vimEnabled) return;
+        const text = ctx.ui.getEditorText();
+        if (text) await enqueueCopy(text, ctx, true);
+        else ctx.ui.notify("Nothing to copy. The draft is empty.", "info");
+      },
+    });
+  }
+  pi.on("session_shutdown", async () => {
     stopInput?.();
     stopInput = undefined;
+    vimEnabled = false;
+    await pendingCopy;
   });
   pi.on("session_start", (_event, ctx) => {
     stopInput?.();
     stopInput = undefined;
+    vimEnabled = false;
     if (ctx.mode !== "tui") return;
     const existing = ctx.ui.getEditorComponent();
     if (existing && existing !== factory) {
@@ -554,10 +674,20 @@ export default function (pi: ExtensionAPI) {
     factory = (tui, theme, bindings) => {
       stopInput?.();
       stopInput = undefined;
-      const created = createVimEditor(tui, theme, bindings, (listener) =>
-        ctx.ui.onTerminalInput(listener),
+      const created = createVimEditor(
+        tui,
+        theme,
+        bindings,
+        (listener) => ctx.ui.onTerminalInput(listener),
+        undefined,
+        copy
+          ? (text) => {
+              void enqueueCopy(text, ctx);
+            }
+          : undefined,
       );
       stopInput = created.dispose;
+      vimEnabled = created.vimEnabled;
       if (!created.vimEnabled)
         ctx.ui.notify(
           "This Pi editor version is unsupported. Vim mode is off; normal Pi editing still works.",
@@ -567,4 +697,8 @@ export default function (pi: ExtensionAPI) {
     };
     ctx.ui.setEditorComponent(factory);
   });
+}
+
+export default function (pi: ExtensionAPI) {
+  installVim(pi);
 }

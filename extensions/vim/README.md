@@ -1,7 +1,7 @@
 # Personal Vim prompt editor
 
-A small Vim layer for Pi's existing prompt editor. No dependencies, subprocesses
-or Neovim configuration. Starts in INSERT and returns there after submitting,
+A small Vim layer for Pi's existing prompt editor. No extra dependencies or
+Neovim configuration. Starts in INSERT and returns there after submitting,
 clearing or replacing a prompt. The bottom border shows INSERT or NORMAL.
 
 Comms uses the same editor for local replies and Next actions. There, Escape in
@@ -30,9 +30,11 @@ interrupting Pi. Ctrl+S saves, Enter inserts a newline, and nothing is sent.
 | `c{motion}` / `d{motion}` | Change / delete with any motion above but `j/k`     |
 | `cc` / `dd`               | Change the line with indentation / delete the line  |
 | `C` / `D`                 | Change / delete to the end of the line              |
+| `yy`                      | Copy the current logical line (Mac prompt)          |
+| `p`                       | Paste the last Vim copy or cut (Mac prompt)         |
 | `{count}{command}`        | Repeat commands except `i/a/I/A/o/O`, such as `10w` |
 
-A pending count, `c`, `d`, `f`, `F`, `t`, `T` or `g` appears in the border, such
+A pending count, `c`, `d`, `f`, `F`, `t`, `T`, `g` or `y` appears in the border, such
 as `2dt` or `dg`. The motion selects the range. Changes enter INSERT. Deletions stay in NORMAL.
 `cw` on a word keeps its following spaces. `dw` also removes the following
 spacing on that line.
@@ -78,7 +80,24 @@ atomic, including when deleted and undone.
 Each change and its replacement text through Escape form one undo step.
 `o/O` group the new line and all text entered through Escape into one step.
 Each deletion is one step. Plain INSERT typing keeps Pi's native grouping.
-Deleting text does not write to the clipboard or a Vim register.
+
+## Clipboard on macOS
+
+**Ctrl+Shift+Y** copies the whole prompt in either mode, without moving the
+cursor or sending. Text behind collapsed paste markers is included.
+
+`yy` copies a logical line to the clipboard. Use `3yy` for three lines. `C`, `D`,
+`cc`, `dd` and `c` / `d` with motions also copy the affected text. A linewise copy
+includes a trailing newline. `x`, native deletions, cancelled edits and undo do
+not change the clipboard.
+
+`p` uses the last Vim copy or cut in the current editor, even if another app has
+changed the clipboard. It puts lines below the cursor and fragments after the
+current character. One undo removes the paste. Use **Cmd+V** to paste the current
+Mac clipboard instead, including text copied with **Ctrl+Shift+Y**. These Vim
+clipboard keys do not apply to the embedded Comms editor.
+
+## Undo and redo
 
 In NORMAL, `Ctrl+R` restores successive undone edits, including grouped changes.
 An empty redo history does nothing. Redo restores saved text, cursor position and
@@ -123,7 +142,8 @@ npm run lint:check
   owns rendering, completion, history and application shortcuts.
 - `motions.ts`: pure word, character-search, buffer and paragraph movement.
 - `operators.ts`: shared change/delete ranges, including counts and Vim's
-  line-boundary rules.
+  line-boundary rules. Linewise ranges identify the copied lines independently
+  of the newlines needed to perform the edit.
 - `editor-port.ts`: guarded private Pi integration. Reuses native grapheme/paste
   segmentation and full undo/redo snapshots. Native undo/edit hooks keep redo
   consistent with Pi shortcuts and async completion. It also observes input before the fullscreen

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Count down the final 10 seconds of each Voice recording in the widget.
 - Show the resolved input for the next recording in `/voice status` without opening the microphone.
 - Add Polish: `/polish <text>` and Ctrl+Alt+P polish a draft with one side request and put the result in the prompt, unsent. One undo restores the original. Rules come from a shared Markdown file, by default the `polish-text` skill's `rules.md`.
 - Add Vim `gg` / `G` buffer jumps and `{` / `}` paragraph motions, with counts, change/delete operators and grouped undo/redo.

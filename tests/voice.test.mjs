@@ -83,7 +83,8 @@ const theme = {
 // Enable the clock before any worker can schedule its five-minute idle timer.
 // Replacing timers after activation would leave the earlier real timer alive.
 test.beforeEach((t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  t.mock.method(performance, "now", () => Date.now());
 });
 
 function parsed(data) {
@@ -988,6 +989,51 @@ test("hold shortcut starts once, consumes repeats, and stops once on release", a
   ]);
   assert.equal(h.editor.getText(), "");
 });
+
+test("recording widget counts down from 10 to 1 before the unchanged 60-second stop", async (t) => {
+  const h = harness(t);
+  await h.enable();
+  const id = await h.record();
+  const initialRenders = h.widgetCalls.length;
+  t.mock.timers.tick(49_999);
+  assert.doesNotMatch(h.renderWidget(), /s left/);
+  assert.equal(h.widgetCalls.length, initialRenders);
+  t.mock.timers.tick(1);
+  for (let seconds = 10; seconds > 0; seconds--) {
+    assert.match(
+      h.renderWidget(),
+      new RegExp(`● recording · ${seconds}s left`),
+    );
+    assert.equal(h.widgetCalls.length, initialRenders + 11 - seconds);
+    assert.deepEqual(h.worker.commands, [{ type: "start", id }]);
+    t.mock.timers.tick(1000);
+  }
+  assert.match(h.renderWidget(), /voice · finalizing/);
+  assert.doesNotMatch(h.renderWidget(), /s left/);
+  assert.deepEqual(h.worker.commands.at(-1), { type: "stop", id });
+  h.worker.emit({ type: "final", id, text: "synthetic speech" });
+  assert.deepEqual(h.pastes, ["synthetic speech"]);
+  assert.deepEqual(h.submissions, []);
+});
+
+for (const end of ["release", "cancel", "final", "shutdown"]) {
+  test(`${end} clears the recording countdown and its redraws`, async (t) => {
+    const h = harness(t);
+    await h.enable();
+    const id = await h.record();
+    t.mock.timers.tick(53_500);
+    assert.match(h.renderWidget(), /7s left/);
+    if (end === "release") await h.input(release);
+    if (end === "cancel") await h.command("cancel");
+    if (end === "final")
+      h.worker.emit({ type: "final", id, text: "synthetic speech" });
+    if (end === "shutdown") await h.emit("session_shutdown");
+    assert.doesNotMatch(h.renderWidget(), /s left/);
+    const renders = h.widgetCalls.length;
+    t.mock.timers.tick(7000);
+    assert.equal(h.widgetCalls.length, renders);
+  });
+}
 
 for (const modifiers of [1, 3, 5]) {
   test(`base-key release stops holding after modifiers change to ${modifiers}`, async (t) => {

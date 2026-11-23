@@ -249,12 +249,14 @@ export function installVoice(
               : controller.state === "loading" && controller.recordingRequested
                 ? "wait before speaking"
                 : `${gesture} ${config.shortcut}${space && releaseSupported() ? " or Space in INSERT" : ""}`;
+          const seconds = controller.countdownSeconds;
+          const detail = seconds === undefined ? hint : `${seconds}s left`;
           const label =
             controller.state === "recording" ? "● recording" : controller.state;
           const lines = wrapTextWithAnsi(
             theme.fg(
               controller.state === "recording" ? "warning" : "muted",
-              `voice · ${label} · ${hint}`,
+              `voice · ${label} · ${detail}`,
             ),
             width,
           );

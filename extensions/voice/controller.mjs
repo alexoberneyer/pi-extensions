@@ -2,6 +2,7 @@ import { stripVTControlCharacters } from "node:util";
 import { launchWorker } from "./client.mjs";
 
 export const IDLE_MS = 300_000;
+const COUNTDOWN_SECONDS = 10;
 const SAFETY = Symbol.for("pi-extensions.voice.worker-safety.v1");
 
 /** A failed process-group teardown must remain blocked across Pi reloads. */
@@ -57,6 +58,8 @@ export class VoiceController {
   #request;
   #queuedStart;
   #timer;
+  #recordingEndsAt;
+  #countdownTimer;
   #idleTimer;
   #closing;
   #safety;
@@ -93,13 +96,39 @@ export class VoiceController {
     return Boolean(this.#queuedStart || this.#request);
   }
 
+  get countdownSeconds() {
+    if (this.#recordingEndsAt === undefined) return;
+    const seconds = Math.ceil(
+      (this.#recordingEndsAt - performance.now()) / 1000,
+    );
+    if (seconds > 0 && seconds <= COUNTDOWN_SECONDS) return seconds;
+  }
+
   #changed() {
     this.#onChange();
   }
 
   #clearTimer() {
     clearTimeout(this.#timer);
+    clearTimeout(this.#countdownTimer);
     this.#timer = undefined;
+    this.#countdownTimer = undefined;
+    this.#recordingEndsAt = undefined;
+  }
+
+  #scheduleCountdown() {
+    if (this.#recordingEndsAt === undefined) return;
+    const remaining = this.#recordingEndsAt - performance.now();
+    // Wake at the next visible second boundary without moving the stop deadline.
+    const next = Math.min(COUNTDOWN_SECONDS, Math.ceil(remaining / 1000) - 1);
+    if (next < 1) return;
+    this.#countdownTimer = setTimeout(
+      () => {
+        this.#scheduleCountdown();
+        if (this.countdownSeconds !== undefined) this.#changed();
+      },
+      Math.ceil(remaining - next * 1000),
+    );
   }
 
   #clearIdleTimer() {
@@ -418,7 +447,10 @@ export class VoiceController {
     if (event.type === "recording") {
       if (this.state !== "starting") return;
       this.state = "recording";
+      const endsAt = performance.now() + this.#recordingMs;
       this.#deadline(this.#recordingMs, () => this.stop());
+      this.#recordingEndsAt = endsAt;
+      this.#scheduleCountdown();
       this.#changed();
     } else if (event.type === "cancelled") {
       this.#request = undefined;

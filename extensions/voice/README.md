@@ -116,7 +116,7 @@ Choose an audio index from your own output. No hardware names or device-list out
 | `finalizing`               | Capture stops and the final decode runs.                       |
 | `pending`                  | Final text awaits insertion or discard. Model may be unloaded. |
 
-Each recording has a hard 60-second limit. Model startup has a 60-second deadline. Microphone startup and finalization each have a 15-second deadline. The capture reader also stops after five seconds without audio. Timeout cleanup shuts down the worker process group, escalating to termination and kill if needed. A cleanup failure blocks replacement workers across reloads. Restart Pi before retrying if it cannot stop the worker.
+Each recording has a hard 60-second limit. The Voice widget counts down the last 10 seconds, then capture stops and the clip finalizes automatically. Model startup has a 60-second deadline. Microphone startup and finalization each have a 15-second deadline. The capture reader also stops after five seconds without audio. Timeout cleanup shuts down the worker process group, escalating to termination and kill if needed. A cleanup failure blocks replacement workers across reloads. Restart Pi before retrying if it cannot stop the worker.
 
 Suspending Pi or opening its external editor discards active dictation before handing over the terminal. Cleanup must finish before another worker can start. Escape remains unrelated to dictation cancellation.
 

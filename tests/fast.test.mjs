@@ -45,6 +45,14 @@ const solModels = [
   getModel("openai", "gpt-6.1-sol"),
   getModel("openai-codex", "gpt-6.1-sol"),
 ];
+const codexSol62 = getModel("openai-codex", "gpt-6.2-sol");
+const openAISol62 = getModel("openai", "gpt-6.2-sol");
+const newModels = [
+  codexSol62,
+  openAISol62,
+  getModel("openai-codex", "gpt-6.2-astra"),
+  getModel("openai", "gpt-6.2-astra"),
+];
 const STATE = "astra-fast";
 
 async function harness(
@@ -117,7 +125,7 @@ test("configured priority preserves reasoning and all other request fields", asy
     service_tier: "priority",
   });
   assert.deepEqual(payload, original);
-  assert.equal(h.statuses.get(STATE), "fast: on");
+  assert.equal(h.statuses.get(STATE), "fast: on (requested)");
   assert.deepEqual(h.manager.getBranch(), []);
 });
 
@@ -139,7 +147,8 @@ test("toggle, explicit settings, status and invalid arguments", async () => {
   const h = await harness();
   await h.command("status");
   assert.equal(h.manager.getBranch().length, 0);
-  assert.match(h.notices.at(-1).message, /increased usage/);
+  assert.match(h.notices.at(-1).message, /Configured: Fast\. Active on/);
+  assert.match(h.notices.at(-1).message, /requests priority.*increased usage/);
   await h.command("");
   assert.equal(await h.request(), undefined);
   assert.equal(h.statuses.get(STATE), "fast: off");
@@ -148,6 +157,10 @@ test("toggle, explicit settings, status and invalid arguments", async () => {
   await h.command("off");
   const entries = h.manager.getBranch().length;
   await h.command("status");
+  assert.equal(
+    h.notices.at(-1).message,
+    "Configured: Off. No service tier override.",
+  );
   await h.command("invalid");
   assert.equal(h.manager.getBranch().length, entries);
   assert.equal(h.notices.at(-1).level, "error");
@@ -171,22 +184,46 @@ test("ignores unsupported models, providers and APIs", async () => {
     { ...model, provider: "openai" },
     { ...model, id: "gpt-6-sol" },
     { ...model, api: "openai-responses" },
-    { ...solModels[0], provider: "openrouter" },
-    { ...solModels[0], api: "openai-completions" },
-    { ...solModels[1], api: "openai-responses" },
+    { ...openAISol62, provider: "openrouter" },
+    { ...openAISol62, api: "openai-completions" },
+    { ...codexSol62, api: "openai-responses" },
+    { ...codexSol62, id: "gpt-6.1-astra" },
+    { ...codexSol62, id: "gpt-6.2-sol-mini" },
+    { ...codexSol62, id: "gpt-7-terra" },
   ]) {
     h.ctx.model = other;
     assert.equal(await h.request(), undefined);
     await h.emit("model_select");
     assert.equal(h.statuses.get(STATE), undefined);
   }
-  await h.command("on");
-  assert.match(h.notices.at(-1).message, /Inactive on this model/);
+  await h.command("status");
+  assert.match(
+    h.notices.at(-1).message,
+    /Configured: Fast\. Inactive on this model \(openai-codex\/gpt-7-terra\)/,
+  );
+  assert.deepEqual(h.manager.getBranch(), []);
   h.ctx.model = model;
   await h.emit("model_select");
-  assert.equal(h.statuses.get(STATE), "fast: on");
+  assert.equal(h.statuses.get(STATE), "fast: on (requested)");
   for (const payload of [null, "text", [], {}, { model: "gpt-6.1-sol" }]) {
     assert.equal(await h.request(payload), undefined);
+  }
+});
+
+test("version policy covers newer Astra and Sol IDs on both routes", async () => {
+  for (const base of [codexSol62, openAISol62]) {
+    const h = await harness(undefined, true, base);
+    for (const id of [
+      "gpt-6.3-sol",
+      "gpt-6.10-astra-2027-01-01",
+      "gpt-7-sol",
+    ]) {
+      h.ctx.model = { ...base, id };
+      await h.command("on");
+      assert.equal((await h.request()).service_tier, "priority");
+      await h.command("ultra");
+      assert.equal((await h.request()).service_tier, "ultrafast");
+    }
   }
 });
 
@@ -240,7 +277,7 @@ for (const sol of solModels) {
       service_tier: "priority",
     });
     assert.deepEqual(payload, original);
-    assert.equal(h.statuses.get(STATE), "fast: on");
+    assert.equal(h.statuses.get(STATE), "fast: on (requested)");
     await h.command("status");
     assert.doesNotMatch(h.notices.at(-1).message, /Inactive/);
     for (const invalid of [null, "text", [], {}, { model: model.id }]) {
@@ -278,7 +315,7 @@ for (const sol of solModels) {
   });
 }
 
-for (const activeModel of [model, ...solModels]) {
+for (const activeModel of [model, ...solModels, ...newModels]) {
   test(`${activeModel.provider}/${activeModel.id} supports explicit Ultra with a cost and eligibility warning`, async () => {
     const h = await harness(undefined, true, activeModel);
     await h.command(" ULTRA ");
@@ -391,6 +428,9 @@ for (const [activeModel, streamSimple, apiKey] of [
   [solModels[1], streamCodex, fakeToken],
   [solModels[0], streamOpenAI, "sk-test-only"],
   [solModels[0], streamOpenAI, fakeToken],
+  [codexSol62, streamCodex, fakeToken],
+  [openAISol62, streamOpenAI, "sk-test-only"],
+  [openAISol62, streamOpenAI, fakeToken],
 ]) {
   const auth = apiKey === fakeToken ? "subscription" : "API key";
   test(`${activeModel.provider}/${activeModel.id} (${auth}) serializes Fast and Ultra with xhigh and omits the tier when off`, async () => {

@@ -2,29 +2,25 @@
 
 Requests `service_tier: "priority"` or, after explicit selection, `"ultrafast"` for supported OpenAI models. It never changes the model, reasoning setting or transport.
 
-Supported model/API combinations currently match the existing implementation:
+On `openai-codex` and `openai` Responses routes, the extension covers GPT-6.2 Sol and Astra, newer numbered releases in those two families, and their dated snapshots. It also keeps GPT-6.1 Sol on both routes and GPT-6 Astra on Codex.
 
-- `openai-codex/gpt-6-astra`
-- `openai/gpt-6.1-sol` with the Responses API
-- `openai-codex/gpt-6.1-sol`
-
-Other models and providers are untouched. Availability depends on the provider and account.
+Pi does not expose model speed tier capabilities. The family rule decides when to request a tier, not whether a future model or your account will accept it. Other models and providers are untouched.
 
 ## Use
 
 **New sessions default to off.** Set `fast.defaultTier` to `"priority"` in private configuration to restore a deliberate priority-on default. Ultrafast cannot be a configuration default.
 
-| Command        | Action                                               |
-| -------------- | ---------------------------------------------------- |
-| `/fast`        | Toggle normal Fast on/off                            |
-| `/fast on`     | Request priority, including when leaving Ultra       |
-| `/fast off`    | Stop overriding the request tier                     |
-| `/fast ultra`  | Explicitly request Ultrafast and show a cost warning |
-| `/fast status` | Inspect without changing anything                    |
+| Command        | Action                                                  |
+| -------------- | ------------------------------------------------------- |
+| `/fast`        | Toggle normal Fast on/off                               |
+| `/fast on`     | Request priority, including when leaving Ultra          |
+| `/fast off`    | Stop overriding the request tier                        |
+| `/fast ultra`  | Explicitly request Ultrafast and show a cost warning    |
+| `/fast status` | Show the configured tier and whether Pi will request it |
 
 Choices affect subsequent requests. They persist on the current session branch and follow reload, resume and tree navigation. Existing saved Ultra choices still restore. Off leaves another extension's tier setting untouched.
 
-The footer reports a requested tier, not proof that the backend honored it. Provider errors are surfaced without silently switching credentials, tiers or billing routes.
+The footer and `/fast status` show what Pi will request, not proof that the backend honored it. Provider errors are surfaced without silently switching credentials, tiers or billing routes.
 
 ## Cost
 
@@ -39,4 +35,4 @@ node scripts/test.mjs tests/fast.test.mjs
 npm run lint:check
 ```
 
-Tests intercept HTTP requests and use fake credentials. No model calls occur. They cover both direct reasoning fields and Pi 1.5's API-key configuration-update representation.
+Tests intercept HTTP requests and use fake credentials. No model calls occur. They cover both direct reasoning fields and the API-key `configuration_update` representation.

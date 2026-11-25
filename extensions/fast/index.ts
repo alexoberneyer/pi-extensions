@@ -8,28 +8,49 @@ import { readConfig } from "../../lib/config.mjs";
 // Keep the original state key so saved Astra settings still restore.
 const STATE = "astra-fast";
 type FastTier = "off" | "priority" | "ultrafast";
+const TIER_LABEL = { off: "Off", priority: "Fast", ultrafast: "Ultrafast" };
+
+function supportsFast(model: ExtensionContext["model"]) {
+  if (!model) return false;
+  const { provider, api, id } = model;
+  const codex = provider === "openai-codex" && api === "openai-codex-responses";
+  if (!codex && !(provider === "openai" && api === "openai-responses")) {
+    return false;
+  }
+  if (id === "gpt-6.1-sol" || (codex && id === "gpt-6-astra")) return true;
+
+  // Pi's catalog does not expose speed tier capabilities. Match the known
+  // model families from 6.2 onward, not arbitrary newer GPT models.
+  const release =
+    /^gpt-(\d+)(?:\.(\d+))?-(?:astra|sol)(?:-\d{4}-\d{2}-\d{2})?$/.exec(id);
+  if (!release) return false;
+  const major = Number(release[1]);
+  return major > 6 || (major === 6 && Number(release[2] ?? 0) >= 2);
+}
 
 export default function (pi: ExtensionAPI) {
   const defaultTier = readConfig().fast.defaultTier as FastTier;
   let tier: FastTier = defaultTier;
 
-  function supportsFast(ctx: ExtensionContext) {
-    return (
-      (ctx.model?.provider === "openai-codex" &&
-        ctx.model.api === "openai-codex-responses" &&
-        ["gpt-6-astra", "gpt-6.1-sol"].includes(ctx.model.id)) ||
-      (ctx.model?.provider === "openai" &&
-        ctx.model.api === "openai-responses" &&
-        ctx.model.id === "gpt-6.1-sol")
-    );
+  function describeStatus(ctx: ExtensionContext) {
+    const configured = `Configured: ${TIER_LABEL[tier]}.`;
+    if (tier === "off") return `${configured} No service tier override.`;
+    const model = ctx.model;
+    if (!model) return `${configured} Inactive: no model selected.`;
+    const name = `${model.provider}/${model.id}`;
+    if (!supportsFast(model)) {
+      return `${configured} Inactive on this model (${name}). No service tier override.`;
+    }
+    const active = `${configured} Active on ${name}: requests ${tier}. Availability depends on provider and account.`;
+    return tier === "priority" ? `${active} Fast has increased usage.` : active;
   }
 
   function updateStatus(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
     ctx.ui.setStatus(
       STATE,
-      supportsFast(ctx)
-        ? `fast: ${tier === "ultrafast" ? "ultra (requested)" : tier === "priority" ? "on" : "off"}`
+      supportsFast(ctx.model)
+        ? `fast: ${tier === "ultrafast" ? "ultra (requested)" : tier === "priority" ? "on (requested)" : "off"}`
         : undefined,
     );
   }
@@ -62,7 +83,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_provider_request", (event, ctx) => {
-    if (tier === "off" || !supportsFast(ctx)) return;
+    if (tier === "off" || !supportsFast(ctx.model)) return;
     const payload = event.payload;
     // Check the actual request too: compaction can use a different model.
     if (
@@ -78,7 +99,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("fast", {
     description:
-      "Set Astra/Sol speed tier (increased usage): /fast [on|off|ultra|status]",
+      "Set OpenAI speed tier (increased usage): /fast [on|off|ultra|status]",
     handler: async (args, ctx) => {
       const action = args.trim().toLowerCase();
       if (!["", "on", "off", "ultra", "status"].includes(action)) {
@@ -95,16 +116,13 @@ export default function (pi: ExtensionAPI) {
         pi.appendEntry(STATE, { enabled: tier !== "off", tier });
       }
       updateStatus(ctx);
-      const scope = supportsFast(ctx)
-        ? ""
-        : " Inactive on this model. Supports openai-codex/gpt-6-astra and openai or openai-codex/gpt-6.1-sol.";
-      const setting =
-        tier === "ultrafast"
-          ? "Ultrafast requested. Availability depends on provider and account. Increased allowance consumption and charges may apply. API keys are billed separately. Pi's displayed cost can underestimate actual provider charges. Verify current pricing before use."
-          : `Fast ${tier === "priority" ? "on: requests priority tier, with increased usage" : "off"}.`;
+      const ultra = tier === "ultrafast";
+      const warning = ultra
+        ? " Increased allowance consumption and charges may apply when requested. API keys are billed separately. Pi's displayed cost can underestimate actual provider charges."
+        : "";
       ctx.ui.notify(
-        `${setting}${scope} Reasoning unchanged.`,
-        tier === "ultrafast" ? "warning" : "info",
+        `${describeStatus(ctx)}${warning}`,
+        ultra ? "warning" : "info",
       );
     },
   });

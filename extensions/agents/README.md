@@ -23,7 +23,7 @@ The package's `ws` dependency supports Codex's existing local socket transport. 
 | Tab/Shift+Tab | Cycle status filters                                                            |
 | Ctrl+O        | Cycle tools                                                                     |
 | Ctrl+P        | All projects or current local project                                           |
-| Ctrl+R        | Refresh external sources and saved Pi history                                   |
+| Ctrl+R        | Refresh live discovery, Pi history and any opened saved catalogs                |
 | Enter         | Open a verified tmux target, return here, or confirm reopening saved Pi history |
 | Ctrl+N        | Launch form on macOS                                                            |
 | Ctrl+X        | Confirm closing the exact selected local tmux pane                              |
@@ -31,6 +31,15 @@ The package's `ws` dependency supports Codex's existing local socket transport. 
 | Escape        | Clear search, then return to the conversation                                   |
 
 Native command strings are only copied, never executed by selecting an external row. Attachment uses structured socket/session/pane identities. Closing a pane is abrupt and can interrupt running work. Saved history is not deleted.
+
+## Saved conversations
+
+**History** shows saved conversations. **All** adds the operational sessions. The first visit to either tab loads the local Claude and Codex catalogs. A `+` next to the count means discovery is not finished. Catalogs are not polled. Refresh them with Ctrl+R.
+
+- Claude reads bounded metadata and conversation text from top-level project transcripts under `CLAUDE_CONFIG_DIR` (default `~/.claude`). Its Updated column uses transcript modification time.
+- Codex reads metadata from the local `state_*.sqlite` catalog under `CODEX_HOME` (default `~/.codex`). It does not need the daemon or read rollouts. Archived and compressed conversations can be listed if indexed.
+
+A matching operational row takes precedence over saved metadata. Saved Claude and Codex rows are browse-only. Use the native client to reopen them where available. The catalogs do not confirm that a rollout is present or resumable. No remote history is scanned.
 
 ## Attention queue
 
@@ -56,7 +65,7 @@ Local adapters read existing native metadata for discovered sessions, respecting
 
 Tmux-only Claude and Codex panes use meaningful agent-set pane titles or custom session names. Generic application titles and generated job hashes are ignored. These labels never prove thread ownership. Pi descriptions and its ownership checks are unchanged. Remote discovery still uses the remote probe's native metadata, without reading remote transcripts on the Mac.
 
-`PI_AGENTS_EXTERNAL=0` disables external discovery. `PI_AGENTS_DEV01=0` disables the configured remote adapter. No remote probe runs with the default null host.
+`PI_AGENTS_EXTERNAL=0` disables external discovery, including Claude and Codex history. `PI_AGENTS_DEV01=0` disables the configured remote adapter. No remote probe runs with the default null host.
 
 ## Launching and attachment
 

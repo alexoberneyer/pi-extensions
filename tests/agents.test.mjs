@@ -937,9 +937,17 @@ test("Enter labels match guarded actions for current, attached, saved and extern
     },
     { agent: row(), filter: 4, label: "Resume saved Pi", resume: true },
     {
-      agent: row({ source: "codex", nativeCommand: "codex resume 'saved'" }),
-      filter: 5,
+      agent: row({
+        source: "codex",
+        status: "ready",
+        nativeCommand: "codex resume 'loaded'",
+      }),
       label: "Show command",
+    },
+    {
+      agent: row({ source: "codex" }),
+      filter: 4,
+      label: "Saved conversation details",
     },
     {
       agent: row({ status: "unknown", tmux: target, owners: [] }),
@@ -1274,20 +1282,23 @@ test("Ctrl+Y copies only an external native command without closing the dashboar
     [
       row({
         source: "codex",
+        status: "ready",
         nativeCommand: "codex resume 'abc'",
       }),
     ],
-    { filter: 4, copy: async (command) => copied.push(command) },
+    { filter: 5, copy: async (command) => copied.push(command) },
   );
   view.handleInput("\x19");
   await tick();
   assert.deepEqual(copied, ["codex resume 'abc'"]);
   assert.equal(state.result, null);
   assert.match(view.render(140).join("\n"), /Native command copied/);
-  view.setData([row({ nativeCommand: "do not copy" })]);
-  view.handleInput("\x19");
-  await tick();
-  assert.equal(copied.length, 1);
+  for (const source of ["pi", "codex"]) {
+    view.setData([row({ source, nativeCommand: "do not copy" })]);
+    view.handleInput("\x19");
+    await tick();
+    assert.equal(copied.length, 1);
+  }
 });
 
 test("clipboard failure stays in the dashboard and shows the command", async () => {
@@ -1295,11 +1306,11 @@ test("clipboard failure stays in the dashboard and shows the command", async () 
     [
       row({
         source: "claude",
+        status: "ready",
         nativeCommand: "claude attach 'abc'",
       }),
     ],
     {
-      filter: 4,
       copy: async () => {
         throw new Error("No clipboard");
       },
@@ -1687,24 +1698,55 @@ test("unconfigured remote keeps local dashboard discovery and launching without 
   }
 });
 
-test("dashboard integrates a fake Claude source while Codex is unavailable", async (t) => {
+test("History loads Claude and Codex catalogs on demand without a Codex daemon", async (t) => {
   const h = await harness(t);
   const bin = join(h.root, "bin");
+  const claudeRoot = join(h.root, "claude");
+  const projects = join(claudeRoot, "projects", "fixture");
+  mkdirSync(projects, { recursive: true });
   mkdirSync(bin);
-  const oldPath = process.env.PATH;
-  const oldHome = process.env.CODEX_HOME;
-  process.env.PATH = bin;
-  process.env.CODEX_HOME = h.root;
+  const env = { PATH: bin, CODEX_HOME: h.root, CLAUDE_CONFIG_DIR: claudeRoot };
+  for (const [key, value] of Object.entries(env)) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    t.after(() => {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    });
+  }
   process.env.PI_AGENTS_EXTERNAL = "1";
-  t.after(() => {
-    if (oldPath === undefined) delete process.env.PATH;
-    else process.env.PATH = oldPath;
-    if (oldHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = oldHome;
-  });
+  const liveId = "00000000-0000-4000-8000-000000000001";
+  const savedId = "00000000-0000-4000-8000-000000000002";
+  const savedFile = join(projects, `${savedId}.jsonl`);
+  for (const [id, content] of [
+    [liveId, "Already open"],
+    [savedId, "Saved Claude prompt"],
+  ]) {
+    writeFileSync(
+      join(projects, `${id}.jsonl`),
+      `${JSON.stringify({
+        type: "user",
+        cwd: h.cwd,
+        sessionId: id,
+        message: { role: "user", content },
+      })}\n`,
+    );
+  }
+  execFileSync(process.execPath, [
+    "--disable-warning=ExperimentalWarning",
+    "-e",
+    `
+    const db = new (require('node:sqlite').DatabaseSync)(process.argv[1]);
+    db.exec('CREATE TABLE threads (id TEXT, cwd TEXT, updated_at INTEGER, title TEXT, archived INTEGER)');
+    db.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?)').run('codex-saved', process.argv[2], 123, 'Saved Codex title', 1);
+    db.close();
+  `,
+    join(h.root, "state_5.sqlite"),
+    h.cwd,
+  ]);
   const fixture = JSON.stringify([
     {
-      sessionId: "claude-fixture",
+      sessionId: liveId,
       cwd: h.cwd,
       name: "External fixture",
       kind: "background",
@@ -1718,27 +1760,52 @@ test("dashboard integrates a fake Claude source while Codex is unavailable", asy
     { mode: 0o700 },
   );
   const command = h.command();
-  let rendered = "";
-  for (let i = 0; i < 100; i++) {
-    await new Promise((done) => setTimeout(done, 10));
-    rendered = h.state.view.render(180).join("\n");
-    if (
-      rendered.includes("External fixture") &&
-      rendered.includes("Codex unavailable")
-    )
-      break;
+  const view = h.state.view;
+  const render = () => view.render(180).map(stripTerminalSequences).join("\n");
+  const waitFor = async (pattern) => {
+    for (let i = 0; i < 100 && !pattern.test(render()); i++)
+      await new Promise((done) => setTimeout(done, 10));
+    assert.match(render(), pattern);
+  };
+  try {
+    await waitFor(/\[Claude\] External fixture/);
+    await waitFor(/Codex unavailable/);
+    assert.match(render(), /\[Pi\]/);
+    assert.match(render(), /History 0\+/);
+    assert.doesNotMatch(render(), /Saved Claude prompt|Saved Codex title/);
+
+    showHistory(view);
+    await waitFor(/Saved: Claude 2 · Codex 1/);
+    assert.match(render(), /History 2\b/);
+    assert.match(render(), /\[Codex\] Saved Codex title/);
+    assert.match(render(), /\[Claude\] Saved Claude prompt/);
+    assert.doesNotMatch(render(), /Already open|External fixture/);
+    view.handleInput("\x0f"); // Pi
+    view.handleInput("\x0f"); // Claude
+    view.handleInput("\x0f"); // Codex
+    assert.equal(view.selectedRow().source, "codex");
+    view.handleInput("\r");
+    assert.match(render(), /Archived in Codex.*Browse only/);
+    assert.equal(h.state.confirms, 0);
+    assert.deepEqual(h.state.switches, []);
+
+    view.handleInput("\t"); // All
+    view.handleInput("\x0f"); // tmux
+    view.handleInput("\x0f"); // All tools
+    assert.match(render(), /\[Claude\] External fixture/);
+    assert.match(render(), /\[Codex\] Saved Codex title/);
+    assert.doesNotMatch(render(), /Already open/);
+
+    rmSync(savedFile);
+    writeFileSync(join(h.root, "state_6.sqlite"), "Not a database");
+    view.handleInput("\x12"); // Ctrl+R
+    await waitFor(/Saved: Claude 1 · Codex unavailable/);
+    assert.doesNotMatch(render(), /Saved Claude prompt|Saved Codex title/);
+    assert.match(render(), /\[Claude\] External fixture/);
+  } finally {
+    view.handleInput("\x1b");
+    await command;
   }
-  assert.match(rendered, /\[Pi\]/);
-  assert.match(rendered, /\[Claude\] External fixture/);
-  assert.match(rendered, /Codex unavailable/);
-  h.state.view.handleInput("\x0f");
-  h.state.view.handleInput("\x0f");
-  assert.equal(h.state.view.selectedRow().source, "claude");
-  h.state.view.handleInput("\r");
-  assert.equal(h.state.confirms, 0);
-  assert.deepEqual(h.state.switches, []);
-  h.state.view.handleInput("\x1b");
-  await command;
 });
 
 test("RPC mode reports status but cannot open a terminal dashboard", async (t) => {

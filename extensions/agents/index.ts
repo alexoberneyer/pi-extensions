@@ -19,6 +19,11 @@ import { createCodexAdapter } from "./codex.ts";
 import { createDev01Adapter } from "./dev01.ts";
 import { ExternalSessions } from "./external.ts";
 import {
+  listClaudeHistory,
+  listCodexHistory,
+  mergeExternalHistory,
+} from "./history.ts";
+import {
   HEARTBEAT_MS,
   Registry,
   mergeRows,
@@ -228,28 +233,44 @@ export default function agentsExtension(pi: ExtensionAPI) {
         ctx.ui.notify(trackingError, "error");
         return;
       }
+      const externalEnabled = process.env.PI_AGENTS_EXTERNAL !== "0";
       const remoteEnabled =
         Boolean(readConfig().remote.host) &&
-        process.env.PI_AGENTS_EXTERNAL !== "0" &&
+        externalEnabled &&
         process.env.PI_AGENTS_DEV01 !== "0";
       const store = registry;
       let history: SavedSession[] = [];
       let historyAbort: AbortController | undefined;
+      let savedAbort: AbortController | undefined;
+      const catalogs = [
+        {
+          name: "Claude",
+          list: listClaudeHistory,
+          rows: [] as AgentRow[],
+          state: "",
+        },
+        {
+          name: "Codex",
+          list: listCodexHistory,
+          rows: [] as AgentRow[],
+          state: "",
+        },
+      ];
       let poll: ReturnType<typeof setInterval> | undefined;
       let view: Dashboard | undefined;
       let loading = "Loading saved sessions…";
       let closed = false;
       const external = new ExternalSessions(
-        process.env.PI_AGENTS_EXTERNAL === "0"
-          ? []
-          : [
+        externalEnabled
+          ? [
               createClaudeAdapter(),
               createCodexAdapter(),
               createLocalTmuxAdapter(() => store.list()),
               ...(process.platform === "darwin" && remoteEnabled
                 ? [createDev01Adapter()]
                 : []),
-            ],
+            ]
+          : [],
         () => update(),
       );
       const cleanup = () => {
@@ -258,6 +279,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
         view?.dispose();
         external.dispose();
         historyAbort?.abort();
+        savedAbort?.abort();
         if (poll) clearInterval(poll);
       };
       const update = () => {
@@ -266,9 +288,22 @@ export default function agentsExtension(pi: ExtensionAPI) {
           view?.setData(
             mergeLocalTmux([
               ...mergeRows(history, store.list(), store.instance),
-              ...external.rows,
+              ...mergeExternalHistory(
+                catalogs.flatMap((catalog) => catalog.rows),
+                external.rows,
+              ),
             ]),
             [loading, external.summary].filter(Boolean).join(" · "),
+            externalEnabled
+              ? {
+                  pending: catalogs.some(
+                    (catalog) => !catalog.state || catalog.state === "loading",
+                  ),
+                  summary: savedAbort
+                    ? `Saved: ${catalogs.map((catalog) => `${catalog.name} ${catalog.state}`).join(" · ")}`
+                    : "",
+                }
+              : undefined,
           );
         } catch (error) {
           view?.setNotice(
@@ -276,8 +311,31 @@ export default function agentsExtension(pi: ExtensionAPI) {
           );
         }
       };
+      const refreshSavedCatalog = () => {
+        savedAbort?.abort();
+        const controller = new AbortController();
+        savedAbort = controller;
+        for (const catalog of catalogs) catalog.state = "loading";
+        update();
+        for (const catalog of catalogs) {
+          void (async () => {
+            try {
+              const rows = await catalog.list(controller.signal);
+              if (controller.signal.aborted) return;
+              catalog.rows = rows;
+              catalog.state = String(rows.length);
+            } catch {
+              if (controller.signal.aborted) return;
+              catalog.rows = [];
+              catalog.state = "unavailable";
+            }
+            update();
+          })();
+        }
+      };
       const refresh = async () => {
         external.refresh();
+        if (savedAbort) refreshSavedCatalog();
         historyAbort?.abort();
         const controller = new AbortController();
         historyAbort = controller;
@@ -330,6 +388,11 @@ export default function agentsExtension(pi: ExtensionAPI) {
               remoteEnabled,
               (target, signal) => attachAgent(tui, target, signal),
               closeTmuxPane,
+              externalEnabled
+                ? () => {
+                    if (!savedAbort) refreshSavedCatalog();
+                  }
+                : undefined,
             );
             update();
             external.start();

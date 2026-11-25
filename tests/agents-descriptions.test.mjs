@@ -27,6 +27,9 @@ const { DescriptionReader, meaningfulTitle } = await jiti.import(
 );
 const { claudeRows, createClaudeAdapter, describeClaudeSession } =
   await jiti.import(join(root, "extensions/agents/claude.ts"));
+const { listClaudeHistory, mergeExternalHistory } = await jiti.import(
+  join(root, "extensions/agents/history.ts"),
+);
 const { localTmuxRows, mergeLocalTmux } = await jiti.import(
   join(root, "extensions/agents/local-tmux.ts"),
 );
@@ -96,7 +99,7 @@ async function describe(
     AbortSignal.timeout(3000),
   );
   const { title: _title, preview: _preview, ...original } = before;
-  const { title, preview, ...state } = result;
+  const { title, preview, transcriptId: _catalogAlias, ...state } = result;
   assert.deepEqual(
     state,
     original,
@@ -290,6 +293,13 @@ test("Claude reads the verified resumed session and prioritizes its saved blocke
   assert.equal(row.title, "Schedule the team retro");
   assert.equal(row.preview, "Which date should I book?");
   assert.equal(row.status, "waiting");
+  assert.equal(row.transcriptId, resumed);
+  const saved = await listClaudeHistory(AbortSignal.timeout(3000), home);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].key, `claude:${resumed}`);
+  assert.deepEqual(mergeExternalHistory(saved, [row]), [row]);
+  const remote = { ...row, host: "dev01", key: `dev01:${row.key}` };
+  assert.deepEqual(mergeExternalHistory(saved, [remote]), [...saved, remote]);
   assert.equal(
     (
       await describe(home, {
@@ -331,6 +341,7 @@ test("mismatched, corrupt and missing Claude metadata never takes discovery down
     const row = await describe(home, { ...native, status: "waiting" });
     assert.equal(row.title, "Claude in notes");
     assert.equal(row.preview, "");
+    assert.equal(row.transcriptId, undefined);
   }
   put(join(home, "jobs", native.id, "state.json"), "corrupt");
   put(transcript(home), 'corrupt\n{"partial":');

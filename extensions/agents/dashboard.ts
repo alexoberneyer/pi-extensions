@@ -46,6 +46,7 @@ const enterLabels = {
   attach: "Attach local tmux",
   remote: "Attach dev01 tmux",
   resume: "Resume saved Pi",
+  saved: "Saved conversation details",
   command: "Show command",
   terminal: "Terminal guidance",
 } as const;
@@ -149,6 +150,7 @@ export class Dashboard implements Component, Focusable {
   private pageSize = 10;
   private renderedWidth = CONTENT_WIDTH + 2;
   private loading = "Loading saved sessions…";
+  private savedCatalog?: { pending: boolean; summary: string };
   private notice = "";
   private disposed = false;
   private form?: LaunchForm;
@@ -170,6 +172,7 @@ export class Dashboard implements Component, Focusable {
     private remoteLaunch = true,
     private opener?: AgentOpener,
     private closer?: PaneCloser,
+    private requestSavedCatalog?: () => void,
   ) {}
 
   get focused(): boolean {
@@ -469,10 +472,15 @@ export class Dashboard implements Component, Focusable {
     }
   }
 
-  setData(rows: AgentRow[], loading = ""): void {
+  setData(
+    rows: AgentRow[],
+    loading = "",
+    savedCatalog?: { pending: boolean; summary: string },
+  ): void {
     if (this.disposed) return;
     this.rows = rows;
     this.loading = loading;
+    this.savedCatalog = savedCatalog;
     this.refilter(this.filter === 1);
     this.tui.requestRender();
   }
@@ -487,7 +495,21 @@ export class Dashboard implements Component, Focusable {
     return this.visible.find((row) => row.key === this.selected);
   }
 
+  private get showingHistory(): boolean {
+    return filters[this.filter] === "History" || filters[this.filter] === "All";
+  }
+
+  private savedDetail(row: AgentRow): string {
+    return [
+      row.detail,
+      `Browse only here. Use ${sources[row.source]}'s native history to reopen.`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+
   private enterAction(row: AgentRow): keyof typeof enterLabels {
+    if (row.status === "inactive" && row.source !== "pi") return "saved";
     if (row.source === "pi" && !row.host && row.current) return "return";
     if (
       row.host === "dev01" &&
@@ -525,13 +547,15 @@ export class Dashboard implements Component, Focusable {
             : "SSH here · remote tmux detach returns to Agents"
           : action === "resume"
             ? "Confirm this conversation is closed elsewhere"
-            : action === "terminal"
-              ? row.owners.length > 1
-                ? "Multiple tracked owners. Do not resume."
-                : row.detail || "Use its original terminal."
-              : action === "return"
-                ? row.model
-                : "";
+            : action === "saved"
+              ? this.savedDetail(row)
+              : action === "terminal"
+                ? row.owners.length > 1
+                  ? "Multiple tracked owners. Do not resume."
+                  : row.detail || "Use its original terminal."
+                : action === "return"
+                  ? row.model
+                  : "";
     return `Enter: ${enterLabels[action]}${detail ? ` · ${plain(detail)}` : ""}`;
   }
 
@@ -633,6 +657,7 @@ export class Dashboard implements Component, Focusable {
       if (this.filter === 1) this.selected = undefined;
       this.notice = "";
       this.refilter();
+      if (this.showingHistory) this.requestSavedCatalog?.();
     } else if (matchesKey(data, "ctrl+p")) {
       this.projectOnly = !this.projectOnly;
       this.refilter();
@@ -643,7 +668,9 @@ export class Dashboard implements Component, Focusable {
     } else if (matchesKey(data, "ctrl+y")) {
       const row = this.selectedRow();
       const command = row?.nativeCommand;
-      if (
+      if (row && this.enterAction(row) === "saved") {
+        this.setNotice(this.savedDetail(row));
+      } else if (
         command &&
         (row.host || row.source !== "pi" || row.tmux) &&
         this.copyCommand
@@ -670,6 +697,7 @@ export class Dashboard implements Component, Focusable {
         else if (action === "attach") this.openAgent(row.tmux!);
         else if (action === "remote") this.openAgent(row.remoteTmux!);
         else if (action === "resume") this.done(row);
+        else if (action === "saved") this.setNotice(this.savedDetail(row));
         else if (action === "command")
           this.setNotice(`Ctrl+Y copies: ${row.nativeCommand}`);
         else
@@ -733,9 +761,20 @@ export class Dashboard implements Component, Focusable {
       this.projectOnly ? this.cwd : undefined,
       this.sourceOptions[this.sourceIndex],
     );
+    const pendingCount = (index: number) =>
+      this.savedCatalog?.pending &&
+      (filters[index] === "History" || filters[index] === "All")
+        ? "+"
+        : "";
+    const footer = [
+      this.showingHistory ? this.savedCatalog?.summary : "",
+      this.loading,
+    ]
+      .filter(Boolean)
+      .join(" · ");
     const tabs = filters
       .map((label, index) => {
-        const text = ` ${label} ${filterRows(scoped, index, "").length} `;
+        const text = ` ${label} ${filterRows(scoped, index, "").length}${pendingCount(index)} `;
         return index === this.filter
           ? th.bg("selectedBg", th.bold(text))
           : th.fg("dim", text);
@@ -762,7 +801,7 @@ export class Dashboard implements Component, Focusable {
           th.fg("dim", this.actionLabel(row)),
           th.fg("dim", row ? connectionLabel(row) : ""),
           this.notice ||
-            this.loading ||
+            footer ||
             "Enlarge the terminal for project groups and previews.",
           help,
         ].slice(0, height),
@@ -777,7 +816,7 @@ export class Dashboard implements Component, Focusable {
         ? tabs
         : th.fg(
             "accent",
-            `${filters[this.filter]} ${filterRows(scoped, this.filter, "").length} · Tab filter · ${scoped.length} total`,
+            `${filters[this.filter]} ${filterRows(scoped, this.filter, "").length}${pendingCount(this.filter)} · Tab filter · ${scoped.length}${pendingCount(filters.length - 1)} total`,
           ),
       ...this.input.render(w),
       th.fg("border", "─".repeat(w)),
@@ -799,14 +838,20 @@ export class Dashboard implements Component, Focusable {
     const items: Array<
       { heading: string } | { agent: AgentRow } | { project: AgentRow }
     > = [];
+    const projectCounts = new Map<string, number>();
+    if (!attention)
+      for (const agent of this.visible) {
+        const key = projectKey(agent);
+        projectCounts.set(key, (projectCounts.get(key) ?? 0) + 1);
+      }
     let previousProject: string | undefined;
     for (const agent of this.visible) {
-      if (!attention && projectKey(agent) !== previousProject) {
-        const count = this.visible.filter(
-          (candidate) => projectKey(candidate) === projectKey(agent),
-        ).length;
-        items.push({ heading: `${projectLabel(agent)}  ${count}` });
-        previousProject = projectKey(agent);
+      const key = projectKey(agent);
+      if (!attention && key !== previousProject) {
+        items.push({
+          heading: `${projectLabel(agent)}  ${projectCounts.get(key)}`,
+        });
+        previousProject = key;
       }
       items.push({ agent });
       if (attention && !projectWidth) items.push({ project: agent });
@@ -880,6 +925,7 @@ export class Dashboard implements Component, Focusable {
       row?.source === "claude" &&
       !row.updated &&
       row.status !== "unknown" &&
+      row.status !== "inactive" &&
       !preview[1]
     )
       preview[1] = "Activity time not provided by Claude.";
@@ -896,7 +942,7 @@ export class Dashboard implements Component, Focusable {
         this.notice ? "warning" : "dim",
         fit(
           this.notice ||
-            this.loading ||
+            footer ||
             (attention
               ? `${this.visible.length} shown · Input/approval, errors, stopped · Oldest known activity first`
               : `${this.visible.length} shown · Pi status requires /reload in each Pi instance`),

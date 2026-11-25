@@ -106,7 +106,11 @@ export function claudeRows(
   return [...rows.values()];
 }
 
-function conversationText(value: unknown, id: string, cwd: string): string {
+export function conversationText(
+  value: unknown,
+  id: string,
+  cwd: string,
+): string {
   const entry = object(value);
   if (
     !entry ||
@@ -188,6 +192,8 @@ export async function describeClaudeSession(
       : "";
   return {
     ...row,
+    // Used only to avoid listing the resumed transcript twice in the catalog.
+    ...(transcriptId !== id ? { transcriptId } : {}),
     title:
       (generatedName ? "" : name) ||
       firstPrompt ||

@@ -101,7 +101,7 @@ function descriptionIds(thread: Record<string, unknown>): string[] {
 }
 
 // These arrive as user-role messages too, but are not the user's task.
-function readableText(value: unknown, ids: string[]): string {
+export function readableText(value: unknown, ids: string[]): string {
   if (typeof value !== "string") return "";
   let text = value;
   if (/^\s*#\s*AGENTS\.md instructions\b/i.test(text)) {

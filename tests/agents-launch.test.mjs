@@ -40,15 +40,19 @@ const jiti = createJiti(import.meta.url, {
 const { Dashboard } = await jiti.import(
   join(root, "extensions/agents/dashboard.ts"),
 );
-const { localTmuxRows, PANE_FORMAT } = await jiti.import(
+const { localTmuxRows, mergeLocalTmux, PANE_FORMAT } = await jiti.import(
   join(root, "extensions/agents/local-tmux.ts"),
 );
 const { LaunchForm } = await jiti.import(
   join(root, "extensions/agents/launch-form.ts"),
 );
-const { validateLaunch, localProject, launchAgent } = await jiti.import(
-  join(root, "extensions/agents/launch.ts"),
-);
+const {
+  validateLaunch,
+  localProject,
+  launchAgent,
+  resumeDisposition,
+  resumeSessionName,
+} = await jiti.import(join(root, "extensions/agents/launch.ts"));
 const { getThemeByName } = await import(
   pathToFileURL(join(packageDir, "dist/modes/interactive/theme/theme.js"))
 );
@@ -108,13 +112,14 @@ function temporary(t) {
 }
 function env(t, key, value) {
   const old = process.env[key];
-  process.env[key] = value;
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
   t.after(() => {
     if (old === undefined) delete process.env[key];
     else process.env[key] = old;
   });
 }
-function form(remote = true, bindings = keys) {
+function form(remote = true, bindings = keys, resume) {
   const results = [];
   const tui = { terminal: { rows: 30 }, requestRender() {} };
   const view = new LaunchForm(
@@ -124,6 +129,7 @@ function form(remote = true, bindings = keys) {
     "/local/project",
     remote,
     (value) => results.push(value),
+    resume,
   );
   view.focused = true;
   return { view, results, tui };
@@ -140,9 +146,28 @@ const row = {
   updated: 1,
   live: true,
 };
+const resumeId = "00000000-0000-4000-8000-000000000001";
+const savedSession = {
+  ...row,
+  source: "claude",
+  current: false,
+  live: false,
+  status: "inactive",
+  key: `claude:${resumeId}`,
+  nativeId: resumeId,
+  cwd: "/original/worktree",
+  title: "Saved fixture",
+};
+
 function dashboard(
   launcher,
-  { copyCommand, opener, remoteLaunch = true } = {},
+  {
+    copyCommand,
+    opener,
+    remoteLaunch = true,
+    findResumeProject,
+    loadCatalog,
+  } = {},
 ) {
   const calls = { closed: 0, refresh: 0, cleanup: 0, opened: [] };
   const tui = { terminal: { rows: 30 }, requestRender() {} };
@@ -161,11 +186,242 @@ function dashboard(
       calls.opened.push({ target, signal });
       return opener ? opener(target, signal) : Promise.resolve("detached");
     },
+    undefined,
+    loadCatalog,
+    findResumeProject,
   );
   view.setData([row]);
   view.focused = true;
   return { view, calls, tui };
 }
+
+for (const agent of ["claude", "codex"]) {
+  test(`History opens a confirmation for the exact saved ${agent} session`, async () => {
+    const calls = [];
+    const target = { socket: "/tmp/fixture.sock", session: "$42", pane: "%7" };
+    const { view, calls: ui } = dashboard(
+      async (request) => {
+        calls.push(request);
+        return { message: "accepted", tmux: target };
+      },
+      { findResumeProject: () => undefined },
+    );
+    const saved = {
+      ...savedSession,
+      source: agent,
+      key: `${agent}:${resumeId}`,
+    };
+    view.setData([saved]);
+    for (let i = 0; i < 4; i++) view.handleInput(tab); // History
+    assert.match(view.render(120).join("\n"), /Enter: Resume in tmux/);
+    view.handleInput(enter);
+    let output = view.render(120).map(stripTerminalSequences).join("\n");
+    assert.match(output, /Resume in tmux/);
+    assert.match(output, /Project\s+\/original\/worktree/);
+    assert.ok(output.includes(resumeId));
+    assert.deepEqual(calls, []);
+    view.setData([{ ...saved, cwd: "/different/project" }]);
+    view.handleInput(enter);
+    view.handleInput(enter);
+    await tick();
+    assert.deepEqual(
+      calls.map(({ host, agent, cwd, resumeId }) => ({
+        host,
+        agent,
+        cwd,
+        resumeId,
+      })),
+      [{ host: "local", agent, cwd: saved.cwd, resumeId }],
+    );
+    assert.deepEqual(
+      ui.opened.map(({ target }) => target),
+      [target],
+    );
+    assert.match(
+      view.render(120).join("\n"),
+      /Detaching leaves the agent running/,
+    );
+  });
+}
+
+test("pasted resume ID uses the catalog's original project and is distinct from New session", () => {
+  let lookups = 0;
+  let loads = 0;
+  const { view, results } = form(true, keys, {
+    loadCatalog: () => loads++,
+    project: (agent, id) => {
+      lookups++;
+      assert.equal(agent, "claude");
+      assert.equal(id, resumeId);
+      return savedSession.cwd;
+    },
+  });
+  move(view, 1);
+  view.handleInput(right); // Claude
+  assert.match(view.render(120).join("\n"), /New session/);
+  assert.equal(loads, 0);
+  move(view, 1);
+  view.handleInput(right); // Resume
+  move(view, 1);
+  view.handleInput(paste(resumeId));
+  const output = view.render(120).map(stripTerminalSequences).join("\n");
+  assert.equal(loads, 1);
+  assert.ok(lookups > 0);
+  assert.match(output, /Project\s+\/original\/worktree/);
+  assert.equal(cursorCount(view.render(120)), 1);
+  view.handleInput(enter);
+  assert.deepEqual(
+    { ...results[0], name: "generated" },
+    {
+      host: "local",
+      agent: "claude",
+      cwd: savedSession.cwd,
+      name: "generated",
+      resumeId,
+    },
+  );
+});
+
+test("unlisted resume requires an exact ID and an explicit original project", () => {
+  const { view, results } = form(true, keys, { project: () => undefined });
+  move(view, 1);
+  view.handleInput(left); // Codex
+  move(view, 1);
+  view.handleInput(right); // Resume
+  move(view, 1);
+  view.handleInput(paste("--last"));
+  view.handleInput(enter);
+  assert.match(view.render(100).join("\n"), /Enter the full session ID/);
+  editProject(view, resumeId);
+  view.handleInput(enter);
+  assert.match(view.render(100).join("\n"), /Enter the original project/);
+  assert.deepEqual(results, []);
+  move(view, 1);
+  view.handleInput(paste("/original/missing-from-catalog"));
+  view.handleInput(enter);
+  assert.equal(results[0].agent, "codex");
+  assert.equal(results[0].resumeId, resumeId);
+  assert.equal(results[0].cwd, "/original/missing-from-catalog");
+});
+
+test("unknown live state requires a separate confirmation and rechecks the same request", async () => {
+  const requests = [];
+  const target = { socket: "/tmp/fixture.sock", session: "$42", pane: "%2" };
+  const { view, calls } = dashboard(
+    async (request) => {
+      requests.push(request);
+      return request.confirmUnverified
+        ? { message: "accepted", tmux: target }
+        : { needsConfirmation: true };
+    },
+    { findResumeProject: () => undefined },
+  );
+  const select = () => {
+    view.handleInput(enter); // Open saved confirmation
+    view.handleInput(enter); // Check live state
+  };
+  view.setData([savedSession]);
+  for (let i = 0; i < 4; i++) view.handleInput(tab);
+  select();
+  await tick();
+  assert.match(
+    view.render(120).join("\n"),
+    /Could not verify whether this session is already open/,
+  );
+  assert.equal(calls.opened.length, 0);
+  view.handleInput(esc);
+  assert.equal(requests.length, 1);
+  select();
+  await tick();
+  view.handleInput(enter);
+  await tick();
+  assert.deepEqual(requests[2], { ...requests[1], confirmUnverified: true });
+  assert.deepEqual(
+    calls.opened.map((call) => call.target),
+    [target],
+  );
+});
+
+test("resume uses only a matching live target and does not ignore ambiguity or failed probes", () => {
+  const name = resumeSessionName("claude", resumeId);
+  const native = { ...savedSession, live: true, status: "ready", pid: 123 };
+  const tmux = { socket: "/tmp/fixture.sock", session: "$42", pane: "%7" };
+  const pane = {
+    ...row,
+    key: "tmux:fixture",
+    source: "tmux",
+    tmuxAgent: "claude",
+    tmuxPids: [123],
+    tmux,
+    tmuxName: name,
+  };
+  const marked = { ...pane, tmuxPids: undefined, tmuxResume: name };
+  const disposition = (native, panes) =>
+    resumeDisposition("claude", resumeId, name, native, panes);
+  assert.deepEqual(disposition([], []), { uncertain: false });
+  assert.deepEqual(
+    disposition(undefined, [pane]),
+    { uncertain: true },
+    "a matching name alone is not evidence",
+  );
+  assert.deepEqual(disposition([], undefined), { uncertain: true });
+  assert.deepEqual(disposition(undefined, [marked]), { target: tmux });
+  assert.deepEqual(
+    disposition(
+      [{ ...native, nativeId: "fixture-job", transcriptId: resumeId }],
+      [pane],
+    ),
+    { target: tmux },
+  );
+  assert.deepEqual(disposition([{ ...native, host: "dev01" }], []), {
+    uncertain: false,
+  });
+  assert.throws(() => disposition([native], []), /already open/);
+  assert.throws(
+    () => disposition([], [{ ...marked, live: false }]),
+    /last resume exited/,
+  );
+  assert.throws(
+    () =>
+      disposition(
+        [native],
+        [
+          pane,
+          { ...marked, key: "tmux:second", tmux: { ...tmux, pane: "%9" } },
+        ],
+      ),
+    /More than one terminal/,
+  );
+});
+
+test("a matching live Codex thread can reuse a launcher pane without guessing from its name", () => {
+  const native = {
+    ...savedSession,
+    source: "codex",
+    key: `codex:${resumeId}`,
+    live: true,
+    status: "ready",
+  };
+  const tmux = { socket: "/tmp/fixture.sock", session: "$42", pane: "%7" };
+  const name = resumeSessionName("codex", resumeId);
+  const pane = {
+    ...row,
+    key: "tmux:fixture",
+    source: "tmux",
+    tmuxAgent: "codex",
+    tmux,
+    tmuxName: name,
+  };
+  const [unverified] = mergeLocalTmux([native, pane], resumeSessionName);
+  assert.equal(unverified.tmux, undefined);
+  const merged = mergeLocalTmux(
+    [native, { ...pane, tmuxResume: name }],
+    resumeSessionName,
+  );
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].key, native.key);
+  assert.deepEqual(merged[0].tmux, tmux);
+});
 
 test("form has only Host, Agent and Project with a generated private job name", () => {
   const { view, results } = form();
@@ -1137,7 +1393,19 @@ function localFixture(t) {
   for (const agent of ["pi", "claude", "codex"])
     writeFileSync(
       join(bin, agent),
-      `#!${process.execPath}\nconst fs = require('node:fs'); fs.writeFileSync(process.env.LAUNCH_FIXTURE + '/agent.json', JSON.stringify({args: process.argv.slice(2), cwd: process.cwd(), env: Object.fromEntries(['PI_SESSION_ID', 'PI_SESSION_FILE', 'CLAUDECODE', 'CODEX_THREAD_ID'].map(key => [key, process.env[key]]))})); if (process.env.AGENT_FAIL) { fs.writeSync(2, 'fixture startup failed' + String.fromCharCode(10)); process.exit(17); }`,
+      `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === 'agents') { console.log('[]'); process.exit(0); }
+const resume = ['--resume', 'resume'].includes(args[0]);
+const keys = ['PI_SESSION_ID', 'PI_SESSION_FILE', 'CLAUDECODE', 'CODEX_THREAD_ID'];
+if (resume) keys.push('CLAUDE_CONFIG_DIR', 'CODEX_HOME');
+fs.writeFileSync(process.env.LAUNCH_FIXTURE + '/agent.json', JSON.stringify({args, cwd: process.cwd(), env: Object.fromEntries(keys.map(key => [key, process.env[key]]))}));
+if (process.env.AGENT_FAIL) {
+  fs.writeSync(2, (resume ? 'fixture saved session not found' : 'fixture startup failed') + String.fromCharCode(10));
+  process.exit(17);
+}
+if (process.env.AGENT_HOLD) setInterval(() => {}, 1000);`,
       { mode: 0o700 },
     );
   writeFileSync(
@@ -1401,17 +1669,166 @@ for (const condition of [
     },
   );
 
+function usePrivateTmux(h) {
+  const socket = join(h.home, "s");
+  writeFileSync(
+    join(h.bin, "tmux"),
+    `#!${process.execPath}\nconst cp = require('node:child_process'); const r = cp.spawnSync(${JSON.stringify(realTmux)}, ['-S', ${JSON.stringify(socket)}, '-f', '/dev/null', ...process.argv.slice(2)], { env: { ...process.env, TMUX: '', TMUX_PANE: '' }, stdio: 'inherit' }); process.exit(r.status ?? 1);`,
+    { mode: 0o700 },
+  );
+  return socket;
+}
+
+for (const agent of ["claude", "codex"]) {
+  test(
+    `real local tmux resumes ${agent} literally, preserves the profile and refuses a simultaneous duplicate`,
+    { skip: process.platform !== "darwin" || !realTmux, timeout: 15_000 },
+    async (t) => {
+      const h = localFixture(t);
+      const socket = usePrivateTmux(h);
+      const key = agent === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
+      const profile = join(h.home, "profile with spaces");
+      env(t, "AGENT_HOLD", "1");
+      env(t, key, agent === "claude" ? profile : undefined);
+      const tmux = (...args) =>
+        execFileSync(realTmux, ["-S", socket, "-f", "/dev/null", ...args], {
+          encoding: "utf8",
+        }).trimEnd();
+      const request = {
+        agent,
+        cwd: h.cwd,
+        terminal: "tmux",
+        task: "",
+        resumeId,
+      };
+      try {
+        tmux("new-session", "-d", "-s", "fixture-anchor", "/bin/sleep", "20");
+        tmux("set-environment", "-g", key, join(h.home, "stale profile"));
+        const attempts = await Promise.allSettled([
+          launchLocal({ ...request, name: "job-first" }),
+          launchLocal({ ...request, name: "job-second" }),
+        ]);
+        assert.equal(
+          attempts.filter((attempt) => attempt.status === "fulfilled").length,
+          1,
+        );
+        assert.match(
+          String(
+            attempts.find((attempt) => attempt.status === "rejected").reason,
+          ),
+          /duplicate session/,
+        );
+        const { tmux: target } = attempts.find(
+          (attempt) => attempt.status === "fulfilled",
+        ).value;
+        assert.match(target.pane, /^%\d+$/);
+        const name = resumeSessionName(agent, resumeId);
+        const output = tmux("list-panes", "-a", "-F", PANE_FORMAT);
+        const [pane] = localTmuxRows(output, []);
+        assert.equal(pane.tmuxResume, name);
+        assert.equal(pane.live, true);
+        assert.deepEqual(pane.tmux, target);
+        assert.equal(
+          localTmuxRows(
+            output.replace(
+              /(job-[0-9a-f]{32}:)\d+/,
+              (_, prefix) => `${prefix}1`,
+            ),
+            [],
+          )[0].tmuxResume,
+          undefined,
+        );
+        const result = await launchAgent(
+          { ...request, host: "local", name: "job-repeat" },
+          AbortSignal.timeout(5_000),
+        );
+        assert.deepEqual(result.tmux, target);
+        assert.match(result.message, /existing/);
+        const invocationPath = join(h.home, "agent.json");
+        for (let i = 0; i < 100 && !existsSync(invocationPath); i++)
+          await new Promise((done) => setTimeout(done, 25));
+        const invocation = JSON.parse(readFileSync(invocationPath, "utf8"));
+        const subcommand = agent === "claude" ? "--resume" : "resume";
+        assert.deepEqual(invocation.args, [subcommand, resumeId]);
+        assert.equal(invocation.cwd, realpathSync(h.cwd));
+        assert.equal(
+          invocation.env[key],
+          agent === "claude" ? profile : undefined,
+        );
+
+        tmux("set-environment", "-g", "AGENT_FAIL", "1");
+        const missingId = "00000000-0000-4000-8000-000000000002";
+        const failure = await launchLocal({ ...request, resumeId: missingId });
+        let status;
+        for (let i = 0; i < 100; i++) {
+          status = tmux(
+            "display-message",
+            "-p",
+            "-t",
+            failure.tmux.pane,
+            "#{pane_dead}:#{pane_dead_status}",
+          );
+          if (status === "1:17") break;
+          await new Promise((done) => setTimeout(done, 25));
+        }
+        assert.equal(status, "1:17");
+        assert.match(
+          tmux("capture-pane", "-p", "-S", "-", "-t", failure.tmux.pane),
+          /fixture saved session not found/,
+        );
+        assert.deepEqual(
+          JSON.parse(readFileSync(invocationPath, "utf8")).args,
+          [subcommand, missingId],
+        );
+        assert.equal(existsSync(join(h.home, "ghostty.jsonl")), false);
+      } finally {
+        spawnSync(realTmux, ["-S", socket, "kill-server"]);
+      }
+    },
+  );
+}
+
+test(
+  "resume rejects a deleted project and unsafe requests before creating any terminal",
+  { skip: process.platform !== "darwin" },
+  async (t) => {
+    const h = localFixture(t);
+    const request = {
+      agent: "claude",
+      cwd: h.cwd,
+      terminal: "tmux",
+      task: "",
+      resumeId,
+    };
+    for (const change of [
+      { agent: "pi" },
+      { terminal: "ghostty" },
+      { resumeId: "--continue" },
+      { task: "do not send a prompt" },
+    ])
+      await assert.rejects(
+        launchLocal({ ...request, ...change }),
+        /Resume requires/,
+      );
+    assert.throws(
+      () => validateLaunch({ ...request, host: "dev01", name: "job" }),
+      /local Claude and Codex only/,
+    );
+    await assert.rejects(
+      launchLocal({ ...request, cwd: join(h.home, "deleted") }),
+      /project directory no longer exists/,
+    );
+    assert.equal(existsSync(join(h.home, "tmux.jsonl")), false);
+    assert.equal(existsSync(join(h.home, "ghostty.jsonl")), false);
+  },
+);
+
 test(
   "real local tmux preserves failed startup output, clears parent context and refuses an existing session name",
   { skip: process.platform !== "darwin" || !realTmux, timeout: 15_000 },
   async (t) => {
     const h = localFixture(t);
-    const socket = join(h.home, "s");
-    writeFileSync(
-      join(h.bin, "tmux"),
-      `#!${process.execPath}\nconst cp = require('node:child_process'); const r = cp.spawnSync(${JSON.stringify(realTmux)}, ['-S', ${JSON.stringify(socket)}, '-f', '/dev/null', ...process.argv.slice(2)], { env: { ...process.env, TMUX: '', TMUX_PANE: '' }, stdio: 'inherit' }); process.exit(r.status ?? 1);`,
-      { mode: 0o700 },
-    );
+    const socket = usePrivateTmux(h);
     env(t, "AGENT_FAIL", "1");
     env(t, "PI_SESSION_ID", "parent");
     env(t, "PI_SESSION_FILE", "parent.jsonl");

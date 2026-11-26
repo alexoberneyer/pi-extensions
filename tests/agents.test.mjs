@@ -1782,6 +1782,14 @@ test("History loads Claude and Codex catalogs on demand without a Codex daemon",
     assert.doesNotMatch(render(), /Already open|External fixture/);
     view.handleInput("\x0f"); // Pi
     view.handleInput("\x0f"); // Claude
+    assert.equal(view.selectedRow().nativeId, savedId);
+    if (process.platform === "darwin") {
+      assert.match(render(), /Enter: Resume in tmux/);
+      view.handleInput("\r");
+      assert.match(render(), /Enter resume · Esc cancel/);
+      assert.match(render(), new RegExp(savedId));
+      view.handleInput("\x1b");
+    }
     view.handleInput("\x0f"); // Codex
     assert.equal(view.selectedRow().source, "codex");
     view.handleInput("\r");

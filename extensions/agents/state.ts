@@ -82,6 +82,7 @@ export interface AgentRow {
   tmux?: TmuxTarget;
   remoteTmux?: RemoteTmuxTarget;
   tmuxName?: string;
+  tmuxResume?: string;
   tmuxAgent?: Exclude<AgentSource, "tmux">;
   tmuxPids?: number[];
   pid?: number;

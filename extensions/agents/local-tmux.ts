@@ -26,6 +26,7 @@ export const PANE_FORMAT = [
   "#{@pi-agents-agent}",
   "#{pane_pid}",
   "#{s/[\t\r\n]/ /:pane_title}",
+  "#{@pi-agents-resume}",
 ].join("\t");
 
 function positivePid(value: unknown): value is number {
@@ -119,9 +120,19 @@ export function localTmuxRows(
   for (const line of output.split("\n")) {
     if (!line) continue;
     const fields = line.split("\t");
-    if (fields.length !== 8 && fields.length !== 9) continue;
-    const [socket, session, pane, dead, cwd, name, agent, rawPid, title] =
-      fields;
+    if (fields.length < 8 || fields.length > 10) continue;
+    const [
+      socket,
+      session,
+      pane,
+      dead,
+      cwd,
+      name,
+      agent,
+      rawPid,
+      title,
+      resume,
+    ] = fields;
     const tmux = { socket, session, pane };
     if (!isTmuxTarget(tmux) || !isAbsolute(cwd) || !["0", "1"].includes(dead))
       continue;
@@ -136,6 +147,10 @@ export function localTmuxRows(
     if (!tmuxAgent) continue;
     const parsedPid = /^\d+$/.test(rawPid) ? Number(rawPid) : undefined;
     const pid = positivePid(parsedPid) ? parsedPid : undefined;
+    // A respawned pane must not inherit the previous process's resume identity.
+    const marker = /^(job-[0-9a-f]{32}):([1-9]\d*)$/.exec(resume ?? "");
+    const tmuxResume =
+      marker && Number(marker[2]) === pid ? marker[1] : undefined;
     rows.push({
       source: "tmux",
       key: `tmux:${socket}:${pane}`,
@@ -154,6 +169,7 @@ export function localTmuxRows(
       owners: [],
       tmux,
       tmuxName: plain(name, 160),
+      tmuxResume,
       tmuxAgent,
       pid,
       tmuxPids: dead === "0" ? descendantPids(pid, tree) : undefined,
@@ -168,8 +184,11 @@ export function localTmuxRows(
   return rows;
 }
 
-/** Use Pi's exact pane identity or Claude's unique live process ancestry. */
-export function mergeLocalTmux(rows: AgentRow[]): AgentRow[] {
+/** Match Pi presence, Claude process ancestry, or an exact launcher marker. */
+export function mergeLocalTmux(
+  rows: AgentRow[],
+  resumeName?: (agent: "claude" | "codex", id: string) => string | undefined,
+): AgentRow[] {
   const panes = rows.filter(
     (row) => row.source === "tmux" && !row.host && row.tmux,
   );
@@ -196,18 +215,28 @@ export function mergeLocalTmux(rows: AgentRow[]): AgentRow[] {
     // PID must never recover attach/close authority from a healthy tmux pane.
     if (
       row.host ||
-      row.source !== "claude" ||
+      (row.source !== "claude" && row.source !== "codex") ||
       !row.live ||
-      row.tmuxAgent ||
-      !positivePid(row.pid)
+      row.tmuxAgent
     )
       continue;
-    const candidates = panes.filter(
+    const agent = row.source;
+    const eligible = panes.filter(
+      (pane) => pane.live && !piPanes.has(pane) && pane.tmuxAgent === agent,
+    );
+    const names = new Set<string>();
+    if (resumeName && eligible.some((pane) => pane.tmuxResume)) {
+      for (const id of [row.nativeId, row.transcriptId]) {
+        const name = id && resumeName(agent, id);
+        if (name) names.add(name);
+      }
+    }
+    const candidates = eligible.filter(
       (pane) =>
-        pane.live &&
-        !piPanes.has(pane) &&
-        pane.tmuxAgent === "claude" &&
-        pane.tmuxPids?.includes(row.pid!),
+        (pane.tmuxResume && names.has(pane.tmuxResume)) ||
+        (agent === "claude" &&
+          positivePid(row.pid) &&
+          pane.tmuxPids?.includes(row.pid!)),
     );
     matches.set(row, candidates);
     for (const pane of candidates)
@@ -227,7 +256,7 @@ export function mergeLocalTmux(rows: AgentRow[]): AgentRow[] {
   });
   const merged = rows.map((row) => {
     if (row.host) return row;
-    if (row.source === "claude") {
+    if (row.source === "claude" || row.source === "codex") {
       const candidates = matches.get(row);
       if (candidates?.length !== 1 || claims.get(candidates[0]) !== 1)
         return row;

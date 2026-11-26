@@ -1,7 +1,12 @@
 import { homedir } from "node:os";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { LaunchForm } from "./launch-form.ts";
-import type { Launcher, LaunchResult } from "./launch.ts";
+import { LaunchForm, type ResumeProject } from "./launch-form.ts";
+import {
+  isResumeAgent,
+  isResumeId,
+  type Launcher,
+  type LaunchResult,
+} from "./launch.ts";
 import type { AgentOpener } from "./attach.ts";
 import { assertCloseablePane, type PaneCloser } from "./close.ts";
 import { isTmuxTarget, type TmuxTarget } from "./tmux-target.ts";
@@ -46,6 +51,7 @@ const enterLabels = {
   attach: "Attach local tmux",
   remote: "Attach dev01 tmux",
   resume: "Resume saved Pi",
+  resumeTmux: "Resume in tmux",
   saved: "Saved conversation details",
   command: "Show command",
   terminal: "Terminal guidance",
@@ -173,6 +179,7 @@ export class Dashboard implements Component, Focusable {
     private opener?: AgentOpener,
     private closer?: PaneCloser,
     private requestSavedCatalog?: () => void,
+    private findResumeProject?: ResumeProject,
   ) {}
 
   get focused(): boolean {
@@ -186,7 +193,7 @@ export class Dashboard implements Component, Focusable {
     if (this.closePrompt) this.closePrompt.focused = value;
   }
 
-  private newAgent(): void {
+  private newAgent(row?: AgentRow): void {
     if (!this.launcher) {
       this.setNotice("New agent launching requires the Mac dashboard.");
       return;
@@ -197,6 +204,14 @@ export class Dashboard implements Component, Focusable {
       );
       return;
     }
+    const saved =
+      row &&
+      isResumeAgent(row.source) &&
+      row.nativeId &&
+      isResumeId(row.nativeId)
+        ? { agent: row.source, id: row.nativeId, cwd: row.cwd }
+        : undefined;
+    if (row && !saved) return;
     const closeForm = () => {
       if (this.form !== form) return;
       this.input.focused = form.focused;
@@ -245,6 +260,10 @@ export class Dashboard implements Component, Focusable {
           .then(
             (result) => {
               if (this.disposed || controller.signal.aborted) return;
+              if ("needsConfirmation" in result) {
+                form.reportUnverifiedResume(request);
+                return;
+              }
               this.refresh();
               openLaunched(result);
             },
@@ -258,6 +277,13 @@ export class Dashboard implements Component, Focusable {
             if (this.launchAbort === controller) this.launchAbort = undefined;
           });
       },
+      this.findResumeProject && this.opener
+        ? {
+            project: this.findResumeProject,
+            loadCatalog: this.requestSavedCatalog,
+            saved,
+          }
+        : undefined,
     );
     form.focused = this.focused;
     this.input.focused = false;
@@ -509,7 +535,17 @@ export class Dashboard implements Component, Focusable {
   }
 
   private enterAction(row: AgentRow): keyof typeof enterLabels {
-    if (row.status === "inactive" && row.source !== "pi") return "saved";
+    if (row.status === "inactive" && row.source !== "pi") {
+      return !row.host &&
+        !row.live &&
+        isResumeAgent(row.source) &&
+        isResumeId(row.nativeId) &&
+        this.findResumeProject &&
+        this.launcher &&
+        this.opener
+        ? "resumeTmux"
+        : "saved";
+    }
     if (row.source === "pi" && !row.host && row.current) return "return";
     if (
       row.host === "dev01" &&
@@ -547,15 +583,17 @@ export class Dashboard implements Component, Focusable {
             : "SSH here · remote tmux detach returns to Agents"
           : action === "resume"
             ? "Confirm this conversation is closed elsewhere"
-            : action === "saved"
-              ? this.savedDetail(row)
-              : action === "terminal"
-                ? row.owners.length > 1
-                  ? "Multiple tracked owners. Do not resume."
-                  : row.detail || "Use its original terminal."
-                : action === "return"
-                  ? row.model
-                  : "";
+            : action === "resumeTmux"
+              ? row.detail || "Open the saved conversation in its project"
+              : action === "saved"
+                ? this.savedDetail(row)
+                : action === "terminal"
+                  ? row.owners.length > 1
+                    ? "Multiple tracked owners. Do not resume."
+                    : row.detail || "Use its original terminal."
+                  : action === "return"
+                    ? row.model
+                    : "";
     return `Enter: ${enterLabels[action]}${detail ? ` · ${plain(detail)}` : ""}`;
   }
 
@@ -697,6 +735,7 @@ export class Dashboard implements Component, Focusable {
         else if (action === "attach") this.openAgent(row.tmux!);
         else if (action === "remote") this.openAgent(row.remoteTmux!);
         else if (action === "resume") this.done(row);
+        else if (action === "resumeTmux") this.newAgent(row);
         else if (action === "saved") this.setNotice(this.savedDetail(row));
         else if (action === "command")
           this.setNotice(`Ctrl+Y copies: ${row.nativeCommand}`);
@@ -960,7 +999,7 @@ export class Dashboard implements Component, Focusable {
     if (this.form) {
       const dialogWidth = Math.min(72, width - 4);
       const innerWidth = dialogWidth - 4;
-      const formHeight = 7;
+      const formHeight = this.form.height;
       if (dialogWidth >= 60 && height >= formHeight + 4)
         dialog = this.dialog(
           this.form.render(innerWidth, formHeight),

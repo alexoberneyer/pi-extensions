@@ -16,19 +16,19 @@ The package's `ws` dependency supports Codex's existing local socket transport. 
 
 ## Controls
 
-| Key           | Action                                                                          |
-| ------------- | ------------------------------------------------------------------------------- |
-| Type          | Search title, tool, project and preview                                         |
-| Up/Down       | Select a row                                                                    |
-| Tab/Shift+Tab | Cycle status filters                                                            |
-| Ctrl+O        | Cycle tools                                                                     |
-| Ctrl+P        | All projects or current local project                                           |
-| Ctrl+R        | Refresh live discovery, Pi history and any opened saved catalogs                |
-| Enter         | Open a verified tmux target, return here, or confirm reopening saved Pi history |
-| Ctrl+N        | Launch form on macOS                                                            |
-| Ctrl+X        | Confirm closing the exact selected local tmux pane                              |
-| Ctrl+Y        | Copy an attach/native command                                                   |
-| Escape        | Clear search, then return to the conversation                                   |
+| Key           | Action                                                                       |
+| ------------- | ---------------------------------------------------------------------------- |
+| Type          | Search title, tool, project and preview                                      |
+| Up/Down       | Select a row                                                                 |
+| Tab/Shift+Tab | Cycle status filters                                                         |
+| Ctrl+O        | Cycle tools                                                                  |
+| Ctrl+P        | All projects or current local project                                        |
+| Ctrl+R        | Refresh live discovery, Pi history and any opened saved catalogs             |
+| Enter         | Open a verified tmux target, return here, or confirm reopening saved history |
+| Ctrl+N        | Launch or resume by ID on macOS                                              |
+| Ctrl+X        | Confirm closing the exact selected local tmux pane                           |
+| Ctrl+Y        | Copy an attach/native command                                                |
+| Escape        | Clear search, then return to the conversation                                |
 
 Native command strings are only copied, never executed by selecting an external row. Attachment uses structured socket/session/pane identities. Closing a pane is abrupt and can interrupt running work. Saved history is not deleted.
 
@@ -39,7 +39,9 @@ Native command strings are only copied, never executed by selecting an external 
 - Claude reads bounded metadata and conversation text from top-level project transcripts under `CLAUDE_CONFIG_DIR` (default `~/.claude`). Its Updated column uses transcript modification time.
 - Codex reads metadata from the local `state_*.sqlite` catalog under `CODEX_HOME` (default `~/.codex`). It does not need the daemon or read rollouts. Archived and compressed conversations can be listed if indexed.
 
-A matching operational row takes precedence over saved metadata. Saved Claude and Codex rows are browse-only. Use the native client to reopen them where available. The catalogs do not confirm that a rollout is present or resumable. No remote history is scanned.
+A matching operational row takes precedence over saved metadata. On macOS, select a saved Claude or Codex conversation and press Enter to review its project and **Resume in tmux**. For an unlisted conversation, use **Ctrl+N → Claude or Codex → Resume**, paste the full session ID and enter the original project directory if it isn't filled in. **New session** is the default.
+
+Resume uses the native CLI and its selected profile. It sends no prompt and does not fall back to a new conversation. The CLI reports missing or unusable history in the tmux pane. An exact live tmux match opens the original pane. A known session open elsewhere stays in its original terminal. If live discovery is unavailable, confirm that the session is closed before proceeding. No remote or hosted cloud history is scanned.
 
 ## Attention queue
 

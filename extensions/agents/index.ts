@@ -13,7 +13,7 @@ import { attachAgent } from "./attach.ts";
 import { closeTmuxPane } from "./close.ts";
 import { createLocalTmuxAdapter, mergeLocalTmux } from "./local-tmux.ts";
 import { tmuxPresence } from "./tmux-target.ts";
-import { launchAgent } from "./launch.ts";
+import { isResumeId, launchAgent, resumeSessionName } from "./launch.ts";
 import { createClaudeAdapter } from "./claude.ts";
 import { createCodexAdapter } from "./codex.ts";
 import { createDev01Adapter } from "./dev01.ts";
@@ -244,12 +244,14 @@ export default function agentsExtension(pi: ExtensionAPI) {
       let savedAbort: AbortController | undefined;
       const catalogs = [
         {
+          source: "claude",
           name: "Claude",
           list: listClaudeHistory,
           rows: [] as AgentRow[],
           state: "",
         },
         {
+          source: "codex",
           name: "Codex",
           list: listCodexHistory,
           rows: [] as AgentRow[],
@@ -286,13 +288,17 @@ export default function agentsExtension(pi: ExtensionAPI) {
         if (closed) return;
         try {
           view?.setData(
-            mergeLocalTmux([
-              ...mergeRows(history, store.list(), store.instance),
-              ...mergeExternalHistory(
-                catalogs.flatMap((catalog) => catalog.rows),
-                external.rows,
-              ),
-            ]),
+            mergeLocalTmux(
+              [
+                ...mergeRows(history, store.list(), store.instance),
+                ...mergeExternalHistory(
+                  catalogs.flatMap((catalog) => catalog.rows),
+                  external.rows,
+                ),
+              ],
+              (agent, id) =>
+                isResumeId(id) ? resumeSessionName(agent, id) : undefined,
+            ),
             [loading, external.summary].filter(Boolean).join(" · "),
             externalEnabled
               ? {
@@ -384,7 +390,10 @@ export default function agentsExtension(pi: ExtensionAPI) {
               },
               cleanup,
               copyToClipboard,
-              process.platform === "darwin" ? launchAgent : undefined,
+              process.platform === "darwin"
+                ? (request, signal) =>
+                    launchAgent(request, signal, () => store.list())
+                : undefined,
               remoteEnabled,
               (target, signal) => attachAgent(tui, target, signal),
               closeTmuxPane,
@@ -392,6 +401,13 @@ export default function agentsExtension(pi: ExtensionAPI) {
                 ? () => {
                     if (!savedAbort) refreshSavedCatalog();
                   }
+                : undefined,
+              externalEnabled
+                ? (agent, id) =>
+                    catalogs
+                      .find((catalog) => catalog.source === agent)
+                      ?.rows.find((row) => row.nativeId?.toLowerCase() === id)
+                      ?.cwd
                 : undefined,
             );
             update();

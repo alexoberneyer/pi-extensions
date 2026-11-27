@@ -282,6 +282,20 @@ export class VimEditor extends CustomEditor {
     this.verticalColumn = undefined;
   }
 
+  /** Leave INSERT directly without sending Escape to Pi. */
+  enterNormalMode(): void {
+    if (!this.port || this.mode !== "insert" || this.pasting) return;
+    this.port.cancelJump();
+    this.finishChange();
+    this.mode = "normal";
+    this.verticalColumn = undefined;
+    const cursor = this.getCursor();
+    const col =
+      this.segments().findLast((item) => item.index < cursor.col)?.index ?? 0;
+    this.move({ ...cursor, col });
+    this.tui.requestRender();
+  }
+
   override handleInput(data: string): void {
     if (!this.port) {
       super.handleInput(data);
@@ -296,20 +310,17 @@ export class VimEditor extends CustomEditor {
       return;
     }
     if (matchesKey(data, "escape")) {
+      const completing = this.isShowingAutocomplete();
+      if (this.mode === "insert" && !this.pending && !completing) {
+        this.enterNormalMode();
+        return;
+      }
       this.port.cancelJump();
       this.verticalColumn = undefined;
       if (this.pending) {
         this.pending = undefined;
-      } else if (this.isShowingAutocomplete()) {
+      } else if (completing) {
         this.port.closeAutocomplete();
-      } else if (this.mode === "insert") {
-        this.finishChange();
-        this.mode = "normal";
-        const cursor = this.getCursor();
-        const col =
-          this.segments().findLast((item) => item.index < cursor.col)?.index ??
-          0;
-        this.move({ ...cursor, col });
       } else if (this.onNormalEscape) {
         this.onNormalEscape();
       } else {

@@ -25,7 +25,10 @@ import { createVoicePreferences } from "./preferences.mjs";
 const WIDGET = "local-voice";
 const voiceControl = (text: string) =>
   /^\/voice(?::[0-9]+)?(?:\s|$)/i.test(text.trimStart());
-type PromptEditor = CustomEditor & { readonly acceptsLiteralSpace?: boolean };
+type PromptEditor = CustomEditor & {
+  readonly acceptsLiteralSpace?: boolean;
+  enterNormalMode?(): void;
+};
 type Target = { editor: PromptEditor; text: string };
 
 // AVFoundation's default can differ from the first device FFmpeg lists.
@@ -172,10 +175,16 @@ export function installVoice(
     onChange: () => render(),
     onNotice: (message, level) => ctx?.ui.notify(message, level),
     onFinal: (text: string, destination: Target | undefined, { explicit }) => {
-      if (!ctx || !atMain() || destination?.editor !== editor) return false;
+      if (!ctx || !destination || !atMain() || destination.editor !== editor)
+        return false;
       if (!explicit && ctx.ui.getEditorText() !== destination.text)
         return false;
       ctx.ui.pasteToEditor(text);
+      if (
+        config.normalAfterInsert &&
+        typeof destination.editor.enterNormalMode === "function"
+      )
+        destination.editor.enterNormalMode();
       return true;
     },
   });

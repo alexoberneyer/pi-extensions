@@ -13,7 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { VoiceKeys } from "../extensions/voice/keys.mjs";
-import { readConfig } from "../lib/config.mjs";
+import { defaults, readConfig } from "../lib/config.mjs";
 
 const packageDir = process.env.PI_TEST_PACKAGE_DIR;
 assert.ok(packageDir, "Run with node scripts/test.mjs.");
@@ -47,12 +47,7 @@ const {
   setKittyProtocolActive,
 } = await jiti.import(alias["@earendil-works/pi-tui"]);
 
-const config = {
-  shortcut: "ctrl+space",
-  mode: "hold",
-  space: false,
-  device: ":default",
-};
+const config = defaults.voice;
 const esc = "\x1b";
 const paste = (text) => `\x1b[200~${text}\x1b[201~`;
 const kitty = (key, modifiers = 1, event = 1) =>
@@ -1183,36 +1178,49 @@ test("provisional previews replace only the widget, never a typed draft", async 
   assert.deepEqual(h.pastes, []);
 });
 
-for (const editor of ["vim", "stock"]) {
-  for (const normal of editor === "vim" ? [false, true] : [false]) {
-    test(`${editor} ${normal ? "Normal" : "Insert"} final is one literal paste and one undo`, async (t) => {
-      const h = harness(t, { editor });
-      if (normal) normalAtStart(h.editor, "original");
-      else {
-        h.editor.setText("original");
-        await h.type(" typed");
-      }
-      const before = h.ctx.ui.getEditorText();
-      await h.enable();
-      const id = await h.record();
-      await h.input(release);
-      const transcript = "dd cw xui\n/voice off";
-      h.worker.emit({ type: "final", id, text: transcript });
-      assert.deepEqual(h.pastes, [transcript]);
-      assert.equal(
-        h.ctx.ui.getEditorText(),
-        normal ? transcript + before : before + transcript,
-      );
-      assert.deepEqual(h.submissions, []);
-      if (editor === "vim") assertMode(h.editor, normal ? "NORMAL" : "INSERT");
-      await h.input(normal ? "u" : "\x1f");
-      assert.equal(
-        h.ctx.ui.getEditorText(),
-        before,
-        "one undo removes the whole final only",
-      );
-    });
-  }
+for (const [editor, normal, normalAfterInsert] of [
+  ["vim", false, false],
+  ["vim", true, false],
+  ["vim", false, true],
+  ["vim", true, true],
+  ["stock", false, true],
+]) {
+  test(`${editor} ${normal ? "Normal" : "Insert"} final is one literal paste and one undo (normalAfterInsert: ${normalAfterInsert})`, async (t) => {
+    const h = harness(t, { editor, voice: { normalAfterInsert } });
+    if (normal) normalAtStart(h.editor, "original");
+    else {
+      h.editor.setText("original");
+      await h.type(" typed");
+    }
+    const before = h.ctx.ui.getEditorText();
+    await h.enable();
+    const id = await h.record();
+    await h.input(release);
+    const lastLine = "/voice off e\u0301";
+    const transcript = `dd cw xui\n${lastLine}`;
+    h.worker.emit({ type: "final", id, text: transcript });
+    assert.deepEqual(h.pastes, [transcript]);
+    assert.equal(
+      h.ctx.ui.getEditorText(),
+      normal ? transcript + before : before + transcript,
+    );
+    assert.deepEqual(h.submissions, []);
+    assert.equal(h.interrupts, 0);
+    const endsInNormal = editor === "vim" && (normal || normalAfterInsert);
+    if (editor === "vim")
+      assertMode(h.editor, endsInNormal ? "NORMAL" : "INSERT");
+    if (endsInNormal)
+      assert.deepEqual(h.editor.getCursor(), {
+        line: 1,
+        col: lastLine.length - (normal ? 0 : 2),
+      });
+    await h.input(endsInNormal ? "u" : "\x1f");
+    assert.equal(
+      h.ctx.ui.getEditorText(),
+      before,
+      "one undo removes the whole final only",
+    );
+  });
 }
 
 test("expanded collapsed-paste drafts are compared without replacing their contents", async (t) => {
@@ -1233,29 +1241,49 @@ test("expanded collapsed-paste drafts are compared without replacing their conte
   assert.equal(h.ctx.ui.getEditorText(), original);
 });
 
-test("a changed draft keeps the final pending until the record shortcut explicitly inserts", async (t) => {
-  const h = harness(t, { voice: { mode: "toggle" } });
-  h.editor.setText("draft");
+for (const action of ["shortcut", "/voice insert"]) {
+  test(`a changed draft stays in Insert until ${action} inserts the pending final`, async (t) => {
+    const h = harness(t, {
+      voice: { mode: "toggle", normalAfterInsert: true },
+    });
+    h.editor.setText("draft");
+    await h.enable();
+    const id = await h.record();
+    await h.input(paste(" changed"));
+    assertMode(h.editor, "INSERT");
+    await h.input(press);
+    h.worker.emit({ type: "final", id, text: " spoken" });
+    assert.equal(h.controller.state, "pending");
+    assert.equal(h.controller.pendingText, " spoken");
+    assert.equal(h.ctx.ui.getEditorText(), "draft changed");
+    assert.deepEqual(h.pastes, []);
+    assertMode(h.editor, "INSERT");
+    assert.match(h.renderWidget(), /ctrl\+space insert/);
+    if (action === "shortcut") {
+      await h.input(press);
+      await h.input(release);
+    } else await h.command("insert");
+    assert.equal(h.ctx.ui.getEditorText(), "draft changed spoken");
+    assert.deepEqual(h.pastes, [" spoken"]);
+    assertMode(h.editor, "NORMAL");
+    assert.equal(h.controller.state, "ready");
+    assert.equal(h.controller.pendingText, "");
+    assert.deepEqual(
+      h.worker.commands.map((event) => event.type),
+      ["start", "stop"],
+    );
+  });
+}
+
+test("an empty final does not leave Insert with normalAfterInsert enabled", async (t) => {
+  const h = harness(t, { voice: { normalAfterInsert: true } });
   await h.enable();
   const id = await h.record();
-  await h.type(" changed");
-  await h.input(press);
-  h.worker.emit({ type: "final", id, text: " spoken" });
-  assert.equal(h.controller.state, "pending");
-  assert.equal(h.controller.pendingText, " spoken");
-  assert.equal(h.ctx.ui.getEditorText(), "draft changed");
-  assert.deepEqual(h.pastes, []);
-  assert.match(h.renderWidget(), /ctrl\+space insert/);
-  await h.input(press);
   await h.input(release);
-  assert.equal(h.ctx.ui.getEditorText(), "draft changed spoken");
-  assert.deepEqual(h.pastes, [" spoken"]);
+  h.worker.emit({ type: "final", id, text: " " });
+  assert.deepEqual(h.pastes, []);
   assert.equal(h.controller.state, "ready");
-  assert.equal(h.controller.pendingText, "");
-  assert.deepEqual(
-    h.worker.commands.map((event) => event.type),
-    ["start", "stop"],
-  );
+  assertMode(h.editor, "INSERT");
 });
 
 for (const editor of ["vim", "stock"]) {

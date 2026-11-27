@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `voice.normalAfterInsert` to enter Vim NORMAL after dictation inserts the final text.
 - Add `ciw` to change the whole word under the cursor and `yiw` to copy it from the macOS prompt.
 - Count down the final 10 seconds of each Voice recording in the widget.
 - Show the resolved input for the next recording in `/voice status` without opening the microphone.

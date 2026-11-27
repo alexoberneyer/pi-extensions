@@ -15,6 +15,7 @@
     "shortcut": "ctrl+space",
     "mode": "hold",
     "space": false,
+    "normalAfterInsert": false,
     "device": ":default"
   },
   "polish": {

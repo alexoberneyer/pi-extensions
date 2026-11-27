@@ -314,6 +314,7 @@ test("voice settings keep unsafe shortcuts and device arguments out", (t) => {
     shortcut: "ctrl+space",
     mode: "hold",
     space: false,
+    normalAfterInsert: false,
     device: ":default",
   });
   for (const shortcut of [
@@ -346,14 +347,21 @@ test("voice settings keep unsafe shortcuts and device arguments out", (t) => {
     write({ voice });
     assert.throws(() => readConfig(path), /voice.mode|voice.device/);
   }
+  write({ voice: { normalAfterInsert: "true" } });
+  assert.throws(
+    () => readConfig(path),
+    /Invalid configuration setting: voice.normalAfterInsert/,
+  );
   write({
     voice: {
       mode: "toggle",
       space: true,
+      normalAfterInsert: true,
       device: ":2",
       shortcut: "ctrl+alt+b",
     },
   });
+  assert.equal(readConfig(path).voice.normalAfterInsert, true);
   assert.equal(readConfig(path).voice.device, ":2");
   assert.equal(readConfig(path).voice.space, true);
   assert.equal(readConfig(path).voice.mode, "toggle");

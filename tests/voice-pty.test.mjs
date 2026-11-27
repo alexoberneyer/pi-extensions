@@ -29,7 +29,9 @@ for (const mode of ["regular", "fullscreen"]) {
         const configFile = join(profile, "config.json");
         writeFileSync(
           configFile,
-          JSON.stringify({ voice: { cancelShortcut: "ctrl+alt+x" } }),
+          JSON.stringify({
+            voice: { cancelShortcut: "ctrl+alt+x", normalAfterInsert: true },
+          }),
         );
         const workerLog = join(home, "worker-events.jsonl");
         const extension = join(home, "fixture.ts");
@@ -179,15 +181,17 @@ try:
         send(b'i')
         drain()
 
-    # Legacy NUL is a toggle, even after Kitty negotiation succeeded.
+    # Legacy NUL toggles and final insertion switches Vim to NORMAL without Escape.
     send(b'\x00')
     wait_for(b'recording')
     send(b'\x00')
     wait_for(b'literal dw')
-    probe('literal dw')
-    send(b'\x1f')
+    if vim: wait_for(b'NORMAL')
+    probe('literal dw', not vim)
+    send(b'u' if vim else b'\x1f')
     drain()
-    probe('')
+    probe('', not vim)
+    if vim: send(b'i')
 
     send(b'\x1b[200~fixture draft\x1b[201~\x00')
     wait_for(b'recording')
@@ -225,10 +229,11 @@ try:
     assert count('worker') == workers + 1 and count('start') == starts + 1
     send(b'\x1b[32;5:3u')
     wait_for(b'literal dw')
-    probe('literal dw')
-    send(b'\x1f')
+    if vim: wait_for(b'NORMAL')
+    probe('literal dw', not vim)
+    send(b'u' if vim else b'\x1f')
     drain()
-    probe('')
+    probe('', not vim)
     wait_for(b'standby', timeout=2)
     assert saved(), 'idle unload disabled Voice persistently'
 
@@ -258,7 +263,7 @@ try:
     assert count('cancel') == 2, entries()
     assert saved()
     with open(os.environ['PI_EXTENSIONS_CONFIG']) as f:
-        assert json.load(f) == {'voice': {'cancelShortcut': 'ctrl+alt+x'}}
+        assert json.load(f) == {'voice': {'cancelShortcut': 'ctrl+alt+x', 'normalAfterInsert': True}}
     print(json.dumps({'exits': [0, 0], 'restored': True}))
 finally:
     if p is not None:

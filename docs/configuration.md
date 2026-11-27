@@ -62,6 +62,7 @@ The public default is `off`. `priority` deliberately increases usage or charges.
     "shortcut": "ctrl+space",
     "mode": "hold",
     "space": false,
+    "normalAfterInsert": false,
     "device": ":default"
   }
 }
@@ -83,7 +84,9 @@ New, resumed, forked and reloaded sessions, new windows and Pi restarts read the
 
 Voice requires macOS arm64, interactive Pi outside SSH, existing `ffmpeg` and `uv`, and cached Python 3.10, `mlx-audio==0.5.3` and `mlx-community/parakeet-tdt-0.6b-v3`. [Run the explicit one-time setup](../extensions/voice/README.md#one-time-setup) to download and cache dependencies and the model as needed. Runtime forces `--offline` and `HF_HUB_OFFLINE=1`, so `/voice` makes no model downloads or network requests.
 
-Previews stay above the editor. Final text uses native bracketed paste at the current cursor and preserves bundled Vim mode. If the draft changes or a modal has focus, the final stays pending in RAM. At the main prompt, press the recording shortcut or run `/voice insert` to explicitly insert. Use `/voice cancel` to discard only speech, or Ctrl+C to discard with native editor clearing. Inserting or discarding a pending final never reloads an unloaded model.
+Previews stay above the editor. Final text uses native bracketed paste at the current cursor and preserves Vim mode by default. `normalAfterInsert: true` switches the bundled Vim prompt to NORMAL after a final transcript is inserted, including pending text you insert explicitly. Ordinary pastes and the stock editor are unchanged. To dictate again from NORMAL, use the recording shortcut or press `i` before using bare hold-Space.
+
+If the draft changes or a modal has focus, the final stays pending in RAM. At the main prompt, press the recording shortcut or run `/voice insert` to explicitly insert. Use `/voice cancel` to discard only speech, or Ctrl+C to discard with native editor clearing. Inserting or discarding a pending final never reloads an unloaded model.
 
 After five idle minutes in ready or pending, the entire model worker unloads. Voice stays enabled in standby, or keeps its pending final in RAM without the model. Loading, recording and finalizing do not idle-unload. Each actively used window has its own process group, not a shared server.
 

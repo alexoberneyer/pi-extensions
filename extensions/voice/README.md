@@ -54,7 +54,9 @@ Runtime startup forces `uv run --offline` and `HF_HUB_OFFLINE=1`. `/voice` does 
 
 Live previews appear in a widget above the editor, not in the draft. They are provisional full replacements. Earlier words can change as more audio arrives. The widget shows at most three wrapped preview lines.
 
-The complete finalized transcript enters through Pi's native bracketed-paste path at the current cursor. It is one literal paste, not simulated typing or Vim commands. The bundled Vim editor preserves NORMAL or INSERT mode, and one undo removes the final paste.
+The complete finalized transcript enters through Pi's native bracketed-paste path at the current cursor. It is one literal paste, not simulated typing or Vim commands. By default the bundled Vim editor preserves NORMAL or INSERT mode, and the paste uses the editor's normal undo behavior.
+
+Set `voice.normalAfterInsert` to `true` to switch the Vim prompt to NORMAL after the final text is inserted. This also applies when you explicitly insert a pending transcript. Ordinary pastes and the stock editor are unchanged. To dictate again from NORMAL, use the recording shortcut or press `i` before using bare hold-Space.
 
 If the draft text has changed since recording began, or a modal has focus when the final arrives, Voice holds the final as `pending` in RAM instead of inserting it. Return to the main prompt and press `Ctrl+Space` to explicitly insert it at the current cursor. That press does not start another recording or load an unloaded model. `/voice insert` does the same. Use `/voice cancel` to discard only speech, or `Ctrl+C` to discard speech with Pi's normal editor-clear behavior. Disabling Voice, reloading or switching sessions discards pending text.
 
@@ -76,6 +78,7 @@ Defaults in `~/.config/pi-extensions/config.json`:
     "shortcut": "ctrl+space",
     "mode": "hold",
     "space": false,
+    "normalAfterInsert": false,
     "device": ":default"
   }
 }

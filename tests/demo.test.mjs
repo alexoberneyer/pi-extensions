@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { createCommsWorld } from "../docs/demo/comms-world.mjs";
 import { createWorld, quote, shellExports } from "../docs/demo/world.mjs";
 import { createDemoWorker, transcript } from "../docs/demo/voice-worker.mjs";
 
@@ -61,6 +62,28 @@ for (const name of ["agents", "comms", "voice"]) {
     );
   });
 }
+
+test("Comms recording uses mock agent commands and blocks desktop helpers", (t) => {
+  const world = createCommsWorld();
+  t.after(() => rmSync(world.root, { recursive: true, force: true }));
+  const env = world.env;
+  assert.equal(env.PI_DEMO_COMMS_ROOT, world.root);
+  assert.equal(env.TMUX, undefined);
+  assert.equal(env.TMUX_PANE, undefined);
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  for (const agent of ["claude", "pi", "codex"]) {
+    const executable = join(world.root, "bin", agent);
+    assert.match(readFileSync(executable, "utf8"), /comms-agent\.mjs/);
+    assert.throws(
+      () => execFileSync(executable, ["prompt"], { env, stdio: "pipe" }),
+      { status: 1 },
+    );
+  }
+  for (const command of ["open", "osascript", "uv", "pbcopy", "pbpaste"])
+    assert.throws(() => execFileSync(command, [], { env, stdio: "pipe" }), {
+      status: 1,
+    });
+});
 
 test("Voice demo emits previews and a final only after explicit stop", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });

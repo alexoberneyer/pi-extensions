@@ -137,7 +137,7 @@ Previews and pending finals stay in memory. The private preference file stores n
 
 ## Verification
 
-The implementation is exercised against Pi 1.5.2. Other Pi versions are not assumed compatible. The older Pi 1.5.0 extraction measurements do not verify Voice.
+The implementation is exercised against Pi 1.6.1. Other Pi versions are not assumed compatible. The older Pi 1.5.0 extraction measurements do not verify Voice.
 
 From the repository root:
 

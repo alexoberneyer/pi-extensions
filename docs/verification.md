@@ -14,6 +14,8 @@ npm run check:release
 
 Target one suite with `node scripts/test.mjs tests/package.test.mjs`. Tests use fake CLIs, fixture projects and local WebSocket/tmux sockets. They do not invoke paid models, real communication sources or your desktop applications. This environment isolation is test hygiene, not a claim of an OS security sandbox.
 
+A fresh GitHub install of the [README pin](../README.md#install) and the full automated checks passed with Pi 1.6.1 and Node 26.8.1. This does not verify real connectors, a live agent's configuration or microphone capture.
+
 ## Optional Python codec fixtures
 
 The default Python suite runs without installing packages. Some reMarkable decoding/rendering tests skip unless `rmscene` and Pillow are installed.
@@ -56,7 +58,7 @@ Real connectors, production services, desktop applications and model calls were 
 
 ## Local voice verification
 
-Voice is exercised against Pi 1.5.2. Its automated suites use synthetic data and fake capture/model adapters. Private preference tests use temporary files. Controller tests use fake timers for idle unload and queued cold capture. PTY tests run real Pi in regular and fullscreen modes to verify Vim-safe literal insertion, undo, Space-tap redraw and reload. These automated checks open no microphone and load no speech model.
+Voice is exercised against Pi 1.6.1. Its automated suites use synthetic data and fake capture/model adapters. Private preference tests use temporary files. Controller tests use fake timers for idle unload and queued cold capture. PTY tests run real Pi in regular and fullscreen modes to verify Vim-safe literal insertion, undo, Space-tap redraw and reload. These automated checks open no microphone and load no speech model.
 
 ```sh
 node scripts/test.mjs tests/config.test.mjs tests/voice.test.mjs tests/voice-state.test.mjs tests/voice-preferences.test.mjs tests/voice-pty.test.mjs

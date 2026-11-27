@@ -1,14 +1,14 @@
 # Pi extensions
 
-Twelve extensions for [Pi](https://github.com/earendil-works/pi). One package, with optional local integrations. Voice is exercised against Pi 1.5.2. The original ten-extension extraction was checked with Pi 1.5.0 and Node 26.8.1. Pi requires Node 22.19.0 or newer. Other Pi versions are not assumed compatible.
+Twelve extensions for [Pi](https://github.com/earendil-works/pi). One package, with optional local integrations. Tested with Pi 1.6.1 and Node 26.8.1. Pi requires Node 22.19.0 or newer. Other Pi versions are not assumed compatible.
 
 ![Agents dashboard switching from all sessions to questions needing attention across projects, with synthetic data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/agents-demo.gif)
 
 `/agents`: find which agent needs you, across projects. Read its question without opening every session.
 
-![Comms reviewing an unsent draft, dismissing its request and undoing the decision, with synthetic data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-demo.gif)
+![Comms opening a synthetic request in a mock agent split, with context pasted manually and left unsent](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-handoff-demo.gif)
 
-`/comms demo`: review an unsent draft, dismiss the request, undo the decision. Sample data only.
+`/comms`: review a request, pick an agent, and paste the context into the new tmux pane. Synthetic data and a mock agent.
 
 ## Install
 
@@ -21,13 +21,13 @@ npm ci --ignore-scripts --legacy-peer-deps
 pi install /absolute/path/to/pi-extensions
 ```
 
-From GitHub, pinned to the feature revision shown in these demos:
+From GitHub, pinned to the verified source revision:
 
 ```sh
-pi install git:github.com/alexoberneyer/pi-extensions@79cbc336c8f0f131dcd70aee03b1204cae02d279
+pi install git:github.com/alexoberneyer/pi-extensions@f46e0c8ab8eb19dd08f1168a5e74d74b02b559f5
 ```
 
-This revision includes Voice and the current Agents and Comms workflows. The older `v0.1.0` source tag does not include Voice. Its release page hosts the GIFs, not the demonstrated source revision.
+This pin includes all twelve extensions. The older `v0.1.0` source tag predates Voice and Polish. Its release page hosts the GIFs.
 
 Run `/reload` in existing Pi sessions. After updating the Voice implementation, fully restart Pi instead. Its native JavaScript modules remain cached across reloads. Use `pi config` to select the extensions you want. Package filters can select individual entrypoints, for example:
 
@@ -61,7 +61,7 @@ Do not load this package alongside older copies of the same extensions. See [mig
 | [Approval](extensions/approval/README.md)       | Confirmation and plan-mode workflow guards         | Generic guards active                                            |
 | [Workflows](extensions/workflows/README.md)     | Plan mode, checklist, subagents and notification   | Plan mode off, bundled guard loaded                              |
 | [Supervisor](extensions/supervisor/README.md)   | Persistent, human-interruptible Pi workers         | Off until explicitly enabled                                     |
-| [Comms](extensions/comms/README.md)             | Communication review queue, drafts and captures    | Queue tools inactive until a user action                         |
+| [Comms](extensions/comms/README.md)             | Communication review queue and agent handoff       | Queue tools inactive until a user action                         |
 | [Workstation](extensions/workstation/README.md) | Private memory, style, resources and hooks         | All private integrations off                                     |
 
 [Watch the Voice interaction demo](extensions/voice/README.md#interaction-demo): preview text, insert the final prompt and undo it. Speech is explicitly simulated.
@@ -81,7 +81,7 @@ See [configuration](docs/configuration.md) for optional integrations and [perfor
 ## Requirements and limits
 
 1. **Pi:** all extensions use its runtime packages as peers. Do not install another copy of Pi inside this package.
-2. **External agents:** install and authenticate the CLIs you actually use. Codex discovery needs an existing compatible local app-server. It does not start one.
+2. **External agents:** install and authenticate the CLIs you actually use. Live Codex discovery needs an existing compatible local app-server. Saved local Codex history does not need the daemon.
 3. **Remote work:** SSH, Bash, tmux and the selected agent must already work on the configured host. Transfers require rsync with `--protect-args`.
 4. **Desktop sources:** Apple Reminders needs macOS Automation permission. reMarkable uses a configured desktop copy and optional Python dependencies. Unsupported desktop features stay unavailable on other systems.
 5. **Web and Comms:** Brave needs your own key. Web extraction uses `uvx`. Comms uses your existing Claude or Pi connectors, not shared credentials or an included Microsoft 365 connection.

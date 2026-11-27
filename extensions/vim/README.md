@@ -157,7 +157,7 @@ npm run lint:check
   no public pre-viewport input hook. Listeners are removed on reload, editor
   recreation and shutdown.
 
-Tested with Pi 1.5.2. After a Pi upgrade, rerun the tests. The command above
+Tested with Pi 1.6.1. After a Pi upgrade, rerun the tests. The command above
 follows the managed install's current version.
 Missing adapter methods disable Vim mode with a warning instead of blocking
 normal typing. Shape checks cannot detect every change in upstream behavior.

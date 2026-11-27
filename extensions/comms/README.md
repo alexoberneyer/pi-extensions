@@ -2,9 +2,9 @@
 
 A local review queue for mail, Teams, calendar and Notion ticket requests. Nothing polls on startup. Browsing saved items makes no model or connector calls.
 
-![Comms reviewing an unsent draft, dismissing its request and undoing the decision, with synthetic data](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-demo.gif)
+![Comms opening a synthetic request in a mock agent split, with context pasted manually and left unsent](https://github.com/alexoberneyer/pi-extensions/releases/download/v0.1.0/comms-handoff-demo.gif)
 
-Review the draft → dismiss → undo. Demo decisions stay in memory. Nothing is sent or added to Reminders.
+Open a request → choose an agent → manually paste the context into the focused split. The recording uses synthetic data, a private clipboard fixture and a mock agent. Nothing is sent.
 
 ## Standalone use
 
@@ -14,7 +14,7 @@ With Pi and this package's JavaScript dependencies already installed, start from
 pi -e ./extensions/comms/index.ts
 ```
 
-Then run `/comms demo`. Demo uses disposable, memory-only data. It cannot read the real queue, enable queue tools, call models, open live sources or write reminders.
+Then run `/comms` for your saved queue or `/comms demo` for a disposable queue. The built-in demo cannot hand off to an agent, read the real queue, enable queue tools, call models, open live sources or write reminders.
 
 | Command             | Effect                                     |
 | ------------------- | ------------------------------------------ |

@@ -90,7 +90,14 @@ function result(value: unknown) {
   };
 }
 
-export default async function comms(pi: ExtensionAPI) {
+export default function comms(pi: ExtensionAPI) {
+  return installComms(pi);
+}
+
+export async function installComms(
+  pi: ExtensionAPI,
+  { copy = copyToClipboard } = {},
+) {
   await initializeApproval(pi);
   const toolNames = ["comms_snapshot", "comms_ingest"];
   const authorized = new Set<string>();
@@ -490,7 +497,7 @@ export default async function comms(pi: ExtensionAPI) {
     handoff = controller;
     try {
       const cwd = notesDirectory(false) || ctx.cwd;
-      await copyToClipboard(handoffContext(selected));
+      await copy(handoffContext(selected));
       signal.throwIfAborted();
       try {
         await launchLocal({ agent, cwd, task: "", terminal: "split" }, signal);
@@ -613,7 +620,7 @@ export default async function comms(pi: ExtensionAPI) {
             throw new Error("Choose a supported agent.");
           return snapshot(await openAgentSplit(ctx, current, agent));
         }
-        await copyToClipboard(handoffContext(current));
+        await copy(handoffContext(current));
         return snapshot("Context copied. Paste it into an agent's prompt.");
       }
       if (

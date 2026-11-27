@@ -44,11 +44,11 @@ Automated synthetic tests use fake capture/model adapters to exercise control fl
 
 ## Compatibility costs
 
-Vim touches guarded private editor internals. A conservative fallback preserves ordinary typing when their shape changes, but cannot guarantee compatibility with behavioral changes. Voice integration is exercised against Pi 1.5.2. The original Pi 1.5.0 extraction check below is historical, not current Voice verification. Retest the relevant suites on Pi upgrades rather than claiming every version works.
+Vim touches guarded private editor internals. A conservative fallback preserves ordinary typing when their shape changes, but cannot guarantee compatibility with behavioral changes. Voice integration is exercised against Pi 1.6.1. The Pi 1.5.0 extraction measurements below are historical and do not cover Voice. Retest the relevant suites on Pi upgrades rather than claiming every version works.
 
 After updating the Voice implementation, fully restart Pi. Native JavaScript modules remain cached across `/reload`. Configuration-only edits can use `/reload` after that restart.
 
-Voice's hold shortcut needs Kitty key-release reporting and otherwise falls back to short-press toggling. Optional bare Space needs release reporting too. It uses a 300 ms hold threshold and leaves taps as native typing. The bundled Vim editor permits Space only in INSERT, and the stock editor is supported. Other custom editors require an explicit `acceptsLiteralSpace` getter. Final insertion uses native bracketed paste, not simulated typing, and preserves bundled Vim mode. Changed drafts or modal focus defer the final in RAM until explicit insertion at the main prompt.
+Voice's hold shortcut needs Kitty key-release reporting and otherwise falls back to short-press toggling. Optional bare Space needs release reporting too. It uses a 300 ms hold threshold and leaves taps as native typing. The bundled Vim editor permits Space only in INSERT, and the stock editor is supported. Other custom editors require an explicit `acceptsLiteralSpace` getter. Final insertion uses native bracketed paste, not simulated typing, and preserves bundled Vim mode by default. Changed drafts or modal focus defer the final in RAM until explicit insertion at the main prompt.
 
 Codex app-server discovery and Claude native agent discovery depend on external CLI interfaces. A changed interface should show unavailable, not guessed status. Platform-specific desktop operations remain platform-specific. Publishing the code does not make Apple Reminders portable to Linux.
 

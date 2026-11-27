@@ -50,11 +50,15 @@ export type DashboardData = {
   reminderList?: string;
   triageStatus?: string;
   triageRunning?: boolean;
+  draftStatus?: { key: string; text: string };
+  draftRunning?: boolean;
   canUndo?: boolean;
 };
 export type LocalAction =
   | "refresh"
-  | "cancel-triage"
+  | "cancel-claude"
+  | "draft-claude"
+  | "replace-draft-claude"
   | "reload"
   | "undo"
   | "reset-demo"
@@ -163,6 +167,7 @@ export class Dashboard implements Component, Focusable {
     list: SelectList;
     height: number;
     groupBreak?: number;
+    replacing: boolean;
   };
   private editing?: EditState;
   private notice = "";
@@ -312,7 +317,8 @@ export class Dashboard implements Component, Focusable {
       noMatch: (text: string) => this.theme.fg("dim", text),
     };
   }
-  private openActions(item: Item, selected = ""): void {
+  private openActions(item: Item, selected = "", replacing = false): void {
+    const claude = item.source === "mail" || item.source === "teams";
     // Legacy meeting and scratchpad items keep generic actions only.
     const replies = (collectionSources as readonly string[]).includes(
       item.source,
@@ -323,10 +329,12 @@ export class Dashboard implements Component, Focusable {
             { value: "save-draft", label: "Edit local draft" },
             ...(!this.demo
               ? [
-                  {
-                    value: "draft-ai",
-                    label: "Draft with AI · return to queue when ready",
-                  },
+                  claude
+                    ? { value: "draft-claude", label: "Draft with Claude" }
+                    : {
+                        value: "draft-ai",
+                        label: "Draft with AI · return to queue when ready",
+                      },
                 ]
               : []),
             ...(item.draft ? [{ value: "copy", label: "Copy draft" }] : []),
@@ -349,16 +357,21 @@ export class Dashboard implements Component, Focusable {
     ];
     // Every listed item is open or a returned wait. Deferrals come back by
     // date and u undoes a decision, so no entry reopens anything.
-    const entries = [
-      ...requestActions,
-      { value: "snooze", label: "Snooze until tomorrow at 09:00" },
-      {
-        value: "waiting",
-        label: `${item.status === "waiting" ? "Still waiting" : "Waiting for a reply"} · back in ${waitingDays} days`,
-      },
-      { value: "resolve", label: "Resolve locally" },
-      { value: "dismiss", label: "Dismiss locally" },
-    ];
+    const entries = replacing
+      ? [
+          { value: "keep-draft", label: "Keep saved draft" },
+          { value: "replace-draft-claude", label: "Replace with Claude draft" },
+        ]
+      : [
+          ...requestActions,
+          { value: "snooze", label: "Snooze until tomorrow at 09:00" },
+          {
+            value: "waiting",
+            label: `${item.status === "waiting" ? "Still waiting" : "Waiting for a reply"} · back in ${waitingDays} days`,
+          },
+          { value: "resolve", label: "Resolve locally" },
+          { value: "dismiss", label: "Dismiss locally" },
+        ];
     // Reserve room for the border, request identity, hints and scroll indicator.
     const maxVisible = Math.max(1, this.tui.terminal.rows - 11);
     const list = new SelectList(
@@ -377,7 +390,10 @@ export class Dashboard implements Component, Focusable {
       if (value === "save-draft" || value === "add-next")
         this.openEditor(item, value);
       else if (value === "draft-ai") this.finish(value, item);
-      else void this.run(value as LocalAction, item);
+      else if (value === "draft-claude" && item.draft)
+        this.openActions(item, "", true);
+      else if (value !== "keep-draft")
+        void this.run(value as LocalAction, item);
       this.syncFocus();
     };
     list.onCancel = () => {
@@ -388,8 +404,9 @@ export class Dashboard implements Component, Focusable {
       item: structuredClone(item),
       list,
       height: this.tui.terminal.rows,
+      replacing,
       groupBreak:
-        requestActions.length && entries.length <= maxVisible
+        !replacing && requestActions.length && entries.length <= maxVisible
           ? requestActions.length
           : undefined,
     };
@@ -495,9 +512,9 @@ export class Dashboard implements Component, Focusable {
     } else if (
       matchesKey(data, "ctrl+x") &&
       !this.demo &&
-      this.data.triageRunning
+      (this.data.triageRunning || this.data.draftRunning)
     )
-      void this.run("cancel-triage");
+      void this.run("cancel-claude");
     else if (matchesKey(data, "ctrl+l")) void this.run("reload");
     else if (this.screen === "detail" && matchesKey(data, "i")) {
       this.detailExpanded = !this.detailExpanded;
@@ -675,6 +692,9 @@ export class Dashboard implements Component, Focusable {
         th.fg("warning", "Not verified"),
         ...text(item.uncertainty),
       );
+    const latestDraft = this.data.draftStatus;
+    if (!this.data.draftRunning && latestDraft?.key === item.key)
+      lines.push("", ...text(latestDraft.text, muted));
     if (item.draft.trim())
       lines.push(
         "",
@@ -772,6 +792,7 @@ export class Dashboard implements Component, Focusable {
       this.openActions(
         this.menu!.item,
         this.menu!.list.getSelectedItem()?.value,
+        this.menu!.replacing,
       );
     const menu = this.menu!;
     const th = this.theme;
@@ -779,7 +800,9 @@ export class Dashboard implements Component, Focusable {
     const choices = menu.list.render(innerWidth);
     if (menu.groupBreak) choices.splice(menu.groupBreak, 0, "");
     const body = [
-      th.bold("Request actions"),
+      th.bold(
+        menu.replacing ? "Replace the saved local draft?" : "Request actions",
+      ),
       th.fg(
         "muted",
         singleLine(`${menu.item.person} · ${sourceNames[menu.item.source]}`),
@@ -905,6 +928,10 @@ export class Dashboard implements Component, Focusable {
           : th.fg("dim", text);
       })
       .join(" ");
+    const draftNotice =
+      this.data.draftRunning || this.data.draftStatus?.key === this.selected
+        ? singleLine(this.data.draftStatus?.text || "")
+        : "";
     const lines = [
       title,
       healthLine,
@@ -957,14 +984,16 @@ export class Dashboard implements Component, Focusable {
       );
       while (lines.length < height - 2) lines.push("");
       lines.push(
-        th.fg("warning", this.notice),
+        th.fg("warning", this.notice || draftNotice),
         th.fg(
           "dim",
-          this.screen === "coverage"
-            ? "Up/Down scroll · ^L reload local · Esc back"
-            : w >= 60
-              ? `${!this.demo && item?.url ? "o original · " : ""}i ${this.detailExpanded ? "hide details" : "details"} · ↑↓ scroll · Enter actions · Esc list`
-              : "i info · ↑↓ · Enter actions · Esc",
+          this.data.draftRunning
+            ? "Claude drafting · ^X cancel · Esc back"
+            : this.screen === "coverage"
+              ? "Up/Down scroll · ^L reload local · Esc back"
+              : w >= 60
+                ? `${!this.demo && item?.url ? "o original · " : ""}i ${this.detailExpanded ? "hide details" : "details"} · ↑↓ scroll · Enter actions · Esc list`
+                : "i info · ↑↓ · Enter actions · Esc",
         ),
       );
       return this.frame(lines, width, height);
@@ -1013,6 +1042,7 @@ export class Dashboard implements Component, Focusable {
       th.fg(
         this.notice ? "warning" : "dim",
         this.notice ||
+          draftNotice ||
           (this.data.triageStatus ? singleLine(this.data.triageStatus) : "") ||
           `${this.selection + (list.length ? 1 : 0)}/${list.length} shown · Saved queue · ^L reload local`,
       ),
@@ -1020,13 +1050,15 @@ export class Dashboard implements Component, Focusable {
         "dim",
         this.busy
           ? "Working · wait for the result before retrying"
-          : this.data.triageRunning
-            ? "Claude triage running · ^X cancel · ^L reload local · Esc"
-            : `n Next · d Drop${this.data.canUndo ? " · u Undo" : ""} · / search · Enter details · ${
-                w >= 110
-                  ? "Tab views · ^O source · ^R triage · ^G coverage · Esc"
-                  : "Tab · Esc"
-              }`,
+          : this.data.draftRunning
+            ? "Claude drafting · ^X cancel · ^L reload local · Esc"
+            : this.data.triageRunning
+              ? "Claude triage running · ^X cancel · ^L reload local · Esc"
+              : `n Next · d Drop${this.data.canUndo ? " · u Undo" : ""} · / search · Enter details · ${
+                  w >= 110
+                    ? "Tab views · ^O source · ^R triage · ^G coverage · Esc"
+                    : "Tab · Esc"
+                }`,
       ),
     );
     return this.frame(lines, width, height);

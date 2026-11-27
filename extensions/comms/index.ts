@@ -19,6 +19,7 @@ import {
   type ActionRequest,
   type ActionResult,
   type Choice,
+  type DashboardData,
   type ViewState,
 } from "./dashboard.ts";
 import {
@@ -48,6 +49,7 @@ import {
 } from "./state.ts";
 import { Store } from "./store.ts";
 import { claimTriage, runClaudeTriage } from "./claude-triage.ts";
+import { runClaudeDraft } from "./claude-draft.ts";
 import {
   candidateSchema,
   duplicateSchema,
@@ -71,7 +73,7 @@ const commandHelp = `Comms commands:
 /comms: open the saved queue
 /comms refresh: collect through Claude
 /comms refresh pi: collect in this Pi conversation
-/comms cancel: stop this session's Claude collector
+/comms cancel: stop this session's Claude triage or draft
 /comms status: show coverage and failures
 /comms demo: open disposable demo data
 /comms help: show this help`;
@@ -107,9 +109,15 @@ export default async function comms(pi: ExtensionAPI) {
   }
   let job: Job | undefined;
   let external:
-    | { controller: AbortController; status: string; finished: Promise<void> }
+    | {
+        kind: "triage" | "draft";
+        controller: AbortController;
+        status: string;
+        finished: Promise<void>;
+      }
     | undefined;
   let triageStatus = "";
+  let draftStatus: DashboardData["draftStatus"];
   let refreshDashboard: (() => void) | undefined;
   let browsing = false;
   let active = true;
@@ -195,11 +203,16 @@ export default async function comms(pi: ExtensionAPI) {
     "session_before_tree",
     "session_tree",
   ] as const)
-    pi.on(event, () => revokeReturn());
+    pi.on(event, () => {
+      revokeReturn();
+      if (external?.kind === "draft") external.controller.abort();
+    });
 
   pi.events.on("dotfiles:plan-mode", (value) => {
     planning = value === true;
-    if (planning) revokeReturn();
+    if (!planning) return;
+    revokeReturn();
+    if (external?.kind === "draft") external.controller.abort();
   });
   pi.on("session_start", () => {
     active = true;
@@ -435,9 +448,9 @@ export default async function comms(pi: ExtensionAPI) {
 
   function runningJob(): string | undefined {
     if (external)
-      return `${external.status}\nClaude triage is already running. Use /comms cancel to stop it.`;
+      return `${external.status}\nClaude ${external.kind === "draft" ? "drafting" : "triage"} is already running. Use /comms cancel to stop it.`;
     if (job)
-      return `Comms ${job.kind === "draft" ? "drafting" : "Pi-native triage"} is already running in Pi. Press Escape in Pi to stop it. /comms cancel only stops Claude triage.`;
+      return `Comms ${job.kind === "draft" ? "drafting" : "Pi-native triage"} is already running in Pi. Press Escape in Pi to stop it. /comms cancel only stops Claude jobs.`;
     return undefined;
   }
   function canStart(ctx: ExtensionCommandContext): void {
@@ -472,6 +485,7 @@ export default async function comms(pi: ExtensionAPI) {
     const runId = randomUUID();
     const startedAt = new Date().toISOString();
     const current = {
+      kind: "triage" as const,
       controller,
       status: "Claude triage starting · /comms cancel stops it",
       finished: Promise.resolve(),
@@ -536,11 +550,14 @@ export default async function comms(pi: ExtensionAPI) {
       }
     })();
   }
-  function cancelClaudeRefresh(): string | undefined {
+  function cancelClaude(): string | undefined {
     if (!external)
-      return runningJob() || "No Claude triage is running in this Pi session.";
-    triageStatus = external.status =
-      "Cancelling Claude triage. Waiting for its process to exit.";
+      return runningJob() || "No Claude job is running in this Pi session.";
+    const label = external.kind === "draft" ? "drafting" : "triage";
+    external.status = `Cancelling Claude ${label}. Waiting for its process to exit.`;
+    if (external.kind === "triage") triageStatus = external.status;
+    else if (draftStatus)
+      draftStatus = { ...draftStatus, text: external.status };
     external.controller.abort();
     refreshDashboard?.();
   }
@@ -597,6 +614,68 @@ export default async function comms(pi: ExtensionAPI) {
       throw error;
     }
   }
+  function startClaudeDraft(ctx: ExtensionCommandContext, item: Item): void {
+    canStart(ctx);
+    const cwd = notesDirectory(false) || packagePath();
+    const voice = voiceInstructions();
+    if (voice.warning) ctx.ui.notify(voice.warning, "warning");
+    const queue = store();
+    const current = {
+      kind: "draft" as const,
+      controller: new AbortController(),
+      status: "Claude drafting · checking the live thread",
+      finished: Promise.resolve(),
+    };
+    const { signal } = current.controller;
+    external = current;
+    const publish = (text: string) => {
+      current.status = clean(text, 340);
+      draftStatus = { key: item.key, text: current.status };
+      if (active) refreshDashboard?.();
+    };
+    publish(current.status);
+    ctx.ui.setStatus("comms-draft", "Claude drafting · /comms cancel stops it");
+    current.finished = (async () => {
+      try {
+        const result = await runClaudeDraft({
+          cwd,
+          item,
+          voice: voice.text,
+          signal,
+          progress: publish,
+        });
+        signal.throwIfAborted();
+        if (!active) return;
+        if (result.status === "blocked") {
+          publish(`Claude could not draft: ${result.text}`);
+          return;
+        }
+        queue.update((state) => {
+          const latest = state.items.find((row) => row.key === item.key);
+          if (!isDeepStrictEqual(latest, item))
+            throw new Error(
+              "Request or draft changed. Claude did not replace it.",
+            );
+          setDraft(state, item.key, item.draftRevision, result.text, "ai");
+        });
+        publish("Claude draft saved locally. Nothing sent.");
+      } catch (error) {
+        publish(
+          signal.aborted
+            ? "Claude drafting cancelled. Local draft unchanged."
+            : errorMessage(error, 340),
+        );
+      } finally {
+        if (external === current) external = undefined;
+        if (active) {
+          ctx.ui.setStatus("comms-draft", undefined);
+          if (!refreshDashboard && draftStatus)
+            ctx.ui.notify(draftStatus.text, "info");
+          refreshDashboard?.();
+        }
+      }
+    })();
+  }
   async function reminders(titles: string[], list: string): Promise<unknown> {
     if (process.platform !== "darwin")
       throw new Error(
@@ -643,7 +722,9 @@ export default async function comms(pi: ExtensionAPI) {
       state: read(),
       reminderList: list,
       triageStatus: demo ? undefined : triageStatus,
-      triageRunning: !demo && Boolean(external),
+      triageRunning: !demo && external?.kind === "triage",
+      draftStatus: demo ? undefined : draftStatus,
+      draftRunning: !demo && external?.kind === "draft",
       canUndo: history.length > 0,
       notice: message,
       select,
@@ -679,12 +760,12 @@ export default async function comms(pi: ExtensionAPI) {
       text,
     }: ActionRequest): Promise<ActionResult> => {
       if (!active) throw new Error("This Comms view has closed.");
-      if (action === "refresh" || action === "cancel-triage") {
-        if (demo) throw new Error("Demo cannot start or cancel live triage.");
+      if (action === "refresh" || action === "cancel-claude") {
+        if (demo)
+          throw new Error("Demo cannot start or cancel live Claude jobs.");
         return snapshot(
-          (action === "refresh"
-            ? startClaudeRefresh(ctx)
-            : cancelClaudeRefresh()) || "",
+          (action === "refresh" ? startClaudeRefresh(ctx) : cancelClaude()) ||
+            "",
         );
       }
       if (action === "reload")
@@ -714,6 +795,17 @@ export default async function comms(pi: ExtensionAPI) {
         );
       }
       const current = currentItem(item);
+      if (action === "draft-claude" || action === "replace-draft-claude") {
+        if (demo) throw new Error("Demo cannot draft with Claude.");
+        if (current.source !== "mail" && current.source !== "teams")
+          throw new Error(
+            "Claude reply drafting requires a mail or Teams item.",
+          );
+        if (current.draft && action !== "replace-draft-claude")
+          throw new Error("Confirm before replacing the saved draft.");
+        startClaudeDraft(ctx, current);
+        return snapshot();
+      }
       if (action === "copy") {
         if (!current.draft) throw new Error("No draft yet.");
         await copyToClipboard(current.draft);
@@ -887,7 +979,12 @@ export default async function comms(pi: ExtensionAPI) {
         if (choice.action === "refresh") startRefresh(ctx);
         else {
           const item = currentItem(choice.item);
-          if (choice.action === "draft-ai") startDraft(ctx, item);
+          if (
+            choice.action === "draft-ai" &&
+            item.source !== "mail" &&
+            item.source !== "teams"
+          )
+            startDraft(ctx, item);
         }
         return;
       } catch (error) {
@@ -946,7 +1043,7 @@ export default async function comms(pi: ExtensionAPI) {
           return;
         }
         if (command === "cancel") {
-          const notice = cancelClaudeRefresh();
+          const notice = cancelClaude();
           if (notice) ctx.ui.notify(notice, "info");
           return;
         }
@@ -954,7 +1051,7 @@ export default async function comms(pi: ExtensionAPI) {
           activateTools("comms_snapshot");
           const state = store().read();
           ctx.ui.notify(
-            `Queue: ${state.items.length} retained items\n${store().file}\nNotes: ${notesDirectory(false) || "not configured"}\nTriage: ${runningJob() || triageStatus || "Claude triage has not run in this Pi session."}\n${state.coverage.map((source) => `${source.source} · ${source.account} · ${source.status} · ${source.checkedAt}\n${source.detail}`).join("\n") || "No sources checked. Run /comms refresh using Claude's existing connections."}`,
+            `Queue: ${state.items.length} retained items\n${store().file}\nNotes: ${notesDirectory(false) || "not configured"}\nTriage: ${triageStatus || "Claude triage has not run in this Pi session."}${draftStatus ? `\nDraft: ${draftStatus.text}` : ""}\n${state.coverage.map((source) => `${source.source} · ${source.account} · ${source.status} · ${source.checkedAt}\n${source.detail}`).join("\n") || "No sources checked. Run /comms refresh using Claude's existing connections."}`,
             "info",
           );
           return;

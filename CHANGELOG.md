@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Draft with Claude reads the selected Outlook or Teams thread and saves an unsent reply in Comms. It never writes to Microsoft 365 or replaces a saved draft without confirmation.
 - Add `voice.normalAfterInsert` to enter Vim NORMAL after dictation inserts the final text.
 - Add `ciw` to change the whole word under the cursor and `yiw` to copy it from the macOS prompt.
 - Count down the final 10 seconds of each Voice recording in the widget.

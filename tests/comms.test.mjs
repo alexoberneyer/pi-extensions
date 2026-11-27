@@ -1057,8 +1057,10 @@ test("editor listeners are removed after disposal and unsupported hooks fall bac
   assert.match(screen(fallback.view), /Request details/);
 });
 
-test("AI drafting starts a selected-item job, while demo hides live actions", () => {
-  const h = dashboard(demoState(first), 30, { demo: false });
+test("calendar keeps Pi drafting, while demo hides live actions", () => {
+  const state = demoState(first);
+  state.items[0].source = "calendar";
+  const h = dashboard(state, 30, { demo: false });
   key(h.view, "\r", "\r");
   selectAction(h.view, "Draft with AI");
   assert.equal(h.choice().action, "draft-ai");
@@ -1067,8 +1069,27 @@ test("AI drafting starts a selected-item job, while demo hides live actions", ()
   key(demo.view, "\r", "\r");
   assert.doesNotMatch(
     screen(demo.view),
-    /Draft with AI|Review & send reply|Review & create Outlook draft|Open original|Add action to Reminders/,
+    /Draft with Claude|Draft with AI|Review & send reply|Review & create Outlook draft|Open original|Add action to Reminders/,
   );
+});
+
+test("replacing a saved Teams draft requires a second selection and keeps the queue open", async () => {
+  const h = dashboard(demoState(first), 30, { demo: false });
+  key(h.view, "\r", "\r");
+  selectAction(h.view, "Draft with Claude");
+  assert.match(screen(h.view), /Replace the saved local draft\?/);
+  assert.equal(h.requests.length, 0);
+  selectAction(h.view, "Keep saved draft");
+  assert.equal(h.requests.length, 0);
+  key(h.view, "\r");
+  selectAction(h.view, "Draft with Claude");
+  h.terminal.rows = 25;
+  selectAction(h.view, "Replace with Claude draft");
+  await settled();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].action, "replace-draft-claude");
+  assert.equal(h.requests[0].item.key, h.data.state.items[0].key);
+  assert.equal(h.choice(), undefined);
 });
 
 test("narrow screens cannot apply hidden editor actions, and disposed views ignore input", async () => {
@@ -1137,7 +1158,7 @@ test("Claude triage starts and cancels in place without closing the dashboard", 
   assert.match(screen(h.view), /\^X cancel/);
   key(h.view, "\x18");
   await settled();
-  assert.equal(h.requests[1].action, "cancel-triage");
+  assert.equal(h.requests[1].action, "cancel-claude");
   assert.equal(h.choice(), undefined);
   assert.match(screen(h.view), /Claude triage cancelled/);
 });
@@ -2138,7 +2159,10 @@ test("legacy meeting and scratchpad items keep loading with generic actions only
     const text = screen(h.view);
     assert.match(text, /Add action to Reminders/);
     assert.match(text, /Resolve locally/);
-    assert.doesNotMatch(text, /Draft with AI|Edit local draft|Integrate/);
+    assert.doesNotMatch(
+      text,
+      /Draft with Claude|Draft with AI|Edit local draft|Integrate/,
+    );
   }
 });
 

@@ -287,7 +287,7 @@ async function harness(t, options = {}) {
     h.queue.update((state) => {
       ingest(
         state,
-        options.source || "teams",
+        options.source || "calendar",
         "me@example.invalid",
         [
           {
@@ -310,7 +310,7 @@ async function harness(t, options = {}) {
   h.view = {
     view: 1,
     search: "Synthetic",
-    source: options.source || "teams",
+    source: options.source || "calendar",
     selected: h.item().key,
   };
   h.launch = async (action = "draft-ai") => {

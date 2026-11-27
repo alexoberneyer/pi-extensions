@@ -19,6 +19,11 @@ import {
 } from "@earendil-works/pi-tui";
 import { createVimEditor } from "../vim/index.ts";
 import {
+  handoffAgents,
+  isHandoffAgent,
+  type HandoffAgent,
+} from "./agent-handoff.ts";
+import {
   clean,
   collectionSources,
   errorMessage,
@@ -40,30 +45,22 @@ export type ViewState = {
   source?: Source;
   selected?: string;
 };
-export type Choice = {
-  action: "refresh" | "draft-ai";
-  item?: Item;
-  view: ViewState;
-};
 export type DashboardData = {
   state: State;
   reminderList?: string;
   triageStatus?: string;
   triageRunning?: boolean;
-  draftStatus?: { key: string; text: string };
-  draftRunning?: boolean;
+  canSplit?: boolean;
   canUndo?: boolean;
 };
 export type LocalAction =
   | "refresh"
   | "cancel-claude"
-  | "draft-claude"
-  | "replace-draft-claude"
+  | "open-agent-split"
   | "reload"
   | "undo"
   | "reset-demo"
-  | "save-draft"
-  | "copy"
+  | "copy-context"
   | "open-original"
   | "open-browser"
   | "add-next"
@@ -75,12 +72,12 @@ export type ActionRequest = {
   action: LocalAction;
   item?: Item;
   text?: string;
+  agent?: HandoffAgent;
 };
 // select moves the highlight to a restored item after an undo.
 export type ActionResult = DashboardData & { notice?: string; select?: string };
 type EditState = {
   item: Item;
-  action: "save-draft" | "add-next";
   editor: Editor;
   vimEnabled: boolean;
   dispose: () => void;
@@ -167,7 +164,7 @@ export class Dashboard implements Component, Focusable {
     list: SelectList;
     height: number;
     groupBreak?: number;
-    replacing: boolean;
+    kind: "actions" | "agent";
   };
   private editing?: EditState;
   private notice = "";
@@ -182,7 +179,7 @@ export class Dashboard implements Component, Focusable {
     private theme: Theme,
     private keys: KeybindingsManager,
     private data: DashboardData,
-    private done: (choice?: Choice) => void,
+    private done: () => void,
     private perform: (request: ActionRequest) => Promise<ActionResult>,
     private demo = false,
     initial: ViewState = { view: 0, search: "" },
@@ -268,17 +265,11 @@ export class Dashboard implements Component, Focusable {
       this.screen = "list";
     this.syncFocus();
   }
-  private finish(action: Choice["action"], item?: Item): void {
-    this.done({
-      action,
-      item: item ? structuredClone(item) : undefined,
-      view: this.viewState(),
-    });
-  }
   private async run(
     action: LocalAction,
     item?: Item,
     text?: string,
+    agent?: HandoffAgent,
   ): Promise<void> {
     if (this.busy || this.disposed) return;
     this.busy = true;
@@ -289,13 +280,14 @@ export class Dashboard implements Component, Focusable {
         action,
         item: item ? structuredClone(item) : undefined,
         text,
+        ...(agent && { agent }),
       });
       if (this.disposed) return;
       this.data = result;
       if (result.select) this.selected = result.select;
       this.notice = singleLine(result.notice || "");
       this.menu = undefined;
-      if (action === "save-draft" || action === "add-next") this.closeEditor();
+      if (action === "add-next") this.closeEditor();
       this.refilter();
     } catch (error) {
       if (!this.disposed) this.notice = singleLine(errorMessage(error));
@@ -317,27 +309,23 @@ export class Dashboard implements Component, Focusable {
       noMatch: (text: string) => this.theme.fg("dim", text),
     };
   }
-  private openActions(item: Item, selected = "", replacing = false): void {
-    const claude = item.source === "mail" || item.source === "teams";
-    // Legacy meeting and scratchpad items keep generic actions only.
-    const replies = (collectionSources as readonly string[]).includes(
-      item.source,
-    );
+  private openActions(
+    item: Item,
+    selected = "",
+    kind: "actions" | "agent" = "actions",
+  ): void {
+    const canHandoff =
+      !this.demo &&
+      (collectionSources as readonly string[]).includes(item.source);
     const requestActions = [
-      ...(replies
+      ...(canHandoff
         ? [
-            { value: "save-draft", label: "Edit local draft" },
-            ...(!this.demo
-              ? [
-                  claude
-                    ? { value: "draft-claude", label: "Draft with Claude" }
-                    : {
-                        value: "draft-ai",
-                        label: "Draft with AI · return to queue when ready",
-                      },
-                ]
-              : []),
-            ...(item.draft ? [{ value: "copy", label: "Copy draft" }] : []),
+            this.data.canSplit
+              ? {
+                  value: "open-agent-split",
+                  label: "Open in split & copy context",
+                }
+              : { value: "copy-context", label: "Copy context" },
           ]
         : []),
       ...(!this.demo && item.url
@@ -357,21 +345,19 @@ export class Dashboard implements Component, Focusable {
     ];
     // Every listed item is open or a returned wait. Deferrals come back by
     // date and u undoes a decision, so no entry reopens anything.
-    const entries = replacing
-      ? [
-          { value: "keep-draft", label: "Keep saved draft" },
-          { value: "replace-draft-claude", label: "Replace with Claude draft" },
-        ]
-      : [
-          ...requestActions,
-          { value: "snooze", label: "Snooze until tomorrow at 09:00" },
-          {
-            value: "waiting",
-            label: `${item.status === "waiting" ? "Still waiting" : "Waiting for a reply"} · back in ${waitingDays} days`,
-          },
-          { value: "resolve", label: "Resolve locally" },
-          { value: "dismiss", label: "Dismiss locally" },
-        ];
+    const entries =
+      kind === "agent"
+        ? [...handoffAgents]
+        : [
+            ...requestActions,
+            { value: "snooze", label: "Snooze until tomorrow at 09:00" },
+            {
+              value: "waiting",
+              label: `${item.status === "waiting" ? "Still waiting" : "Waiting for a reply"} · back in ${waitingDays} days`,
+            },
+            { value: "resolve", label: "Resolve locally" },
+            { value: "dismiss", label: "Dismiss locally" },
+          ];
     // Reserve room for the border, request identity, hints and scroll indicator.
     const maxVisible = Math.max(1, this.tui.terminal.rows - 11);
     const list = new SelectList(
@@ -387,13 +373,13 @@ export class Dashboard implements Component, Focusable {
     );
     list.onSelect = ({ value }) => {
       this.menu = undefined;
-      if (value === "save-draft" || value === "add-next")
-        this.openEditor(item, value);
-      else if (value === "draft-ai") this.finish(value, item);
-      else if (value === "draft-claude" && item.draft)
-        this.openActions(item, "", true);
-      else if (value !== "keep-draft")
-        void this.run(value as LocalAction, item);
+      if (kind === "agent") {
+        if (isHandoffAgent(value))
+          void this.run("open-agent-split", item, undefined, value);
+      } else if (value === "open-agent-split")
+        this.openActions(item, "", "agent");
+      else if (value === "add-next") this.openEditor(item);
+      else void this.run(value as LocalAction, item);
       this.syncFocus();
     };
     list.onCancel = () => {
@@ -404,9 +390,11 @@ export class Dashboard implements Component, Focusable {
       item: structuredClone(item),
       list,
       height: this.tui.terminal.rows,
-      replacing,
+      kind,
       groupBreak:
-        !replacing && requestActions.length && entries.length <= maxVisible
+        kind === "actions" &&
+        requestActions.length &&
+        entries.length <= maxVisible
           ? requestActions.length
           : undefined,
     };
@@ -422,7 +410,7 @@ export class Dashboard implements Component, Focusable {
     if (edit.editor.getExpandedText() !== edit.original) edit.discard = true;
     else this.closeEditor();
   }
-  private openEditor(item: Item, action: EditState["action"]): void {
+  private openEditor(item: Item): void {
     this.closeEditor();
     const created = createVimEditor(
       this.tui,
@@ -436,12 +424,9 @@ export class Dashboard implements Component, Focusable {
     );
     const { editor } = created;
     editor.disableSubmit = true;
-    const original =
-      action === "save-draft" ? item.draft : firstSentence(item.suggestion);
-    editor.setText(original);
+    editor.setText(firstSentence(item.suggestion));
     this.editing = {
       item: structuredClone(item),
-      action,
       ...created,
       original: editor.getExpandedText(),
       discard: false,
@@ -487,17 +472,10 @@ export class Dashboard implements Component, Focusable {
         this.cancelEditor();
       } else if (
         matchesKey(data, "ctrl+s") ||
-        (edit.action === "add-next" &&
-          this.keys.matches(data, "tui.input.submit"))
+        this.keys.matches(data, "tui.input.submit")
       ) {
-        // One Next action is one line, so Enter adds it.
-        void this.run(edit.action, edit.item, edit.editor.getExpandedText());
-      } else {
-        // A reply editor uses Enter for paragraphs, never sending or saving.
-        edit.editor.handleInput(
-          this.keys.matches(data, "tui.input.submit") ? "\n" : data,
-        );
-      }
+        void this.run("add-next", edit.item, edit.editor.getExpandedText());
+      } else edit.editor.handleInput(data);
       this.syncFocus();
     } else if (this.menu) {
       this.menu.list.handleInput(data);
@@ -512,7 +490,7 @@ export class Dashboard implements Component, Focusable {
     } else if (
       matchesKey(data, "ctrl+x") &&
       !this.demo &&
-      (this.data.triageRunning || this.data.draftRunning)
+      this.data.triageRunning
     )
       void this.run("cancel-claude");
     else if (matchesKey(data, "ctrl+l")) void this.run("reload");
@@ -594,7 +572,7 @@ export class Dashboard implements Component, Focusable {
             this.openActions(item);
           } else if (this.demo)
             this.notice = "Demo mode cannot write to Reminders.";
-          else this.openEditor(item, "add-next");
+          else this.openEditor(item);
         }
       }
     }
@@ -692,9 +670,6 @@ export class Dashboard implements Component, Focusable {
         th.fg("warning", "Not verified"),
         ...text(item.uncertainty),
       );
-    const latestDraft = this.data.draftStatus;
-    if (!this.data.draftRunning && latestDraft?.key === item.key)
-      lines.push("", ...text(latestDraft.text, muted));
     if (item.draft.trim())
       lines.push(
         "",
@@ -792,7 +767,7 @@ export class Dashboard implements Component, Focusable {
       this.openActions(
         this.menu!.item,
         this.menu!.list.getSelectedItem()?.value,
-        this.menu!.replacing,
+        this.menu!.kind,
       );
     const menu = this.menu!;
     const th = this.theme;
@@ -801,7 +776,9 @@ export class Dashboard implements Component, Focusable {
     if (menu.groupBreak) choices.splice(menu.groupBreak, 0, "");
     const body = [
       th.bold(
-        menu.replacing ? "Replace the saved local draft?" : "Request actions",
+        menu.kind === "agent"
+          ? "Open in split & copy context"
+          : "Request actions",
       ),
       th.fg(
         "muted",
@@ -811,9 +788,12 @@ export class Dashboard implements Component, Focusable {
       "",
       ...choices,
       "",
-      ...wrapTextWithAnsi("↑↓ choose · Enter apply · Esc back", innerWidth).map(
-        (line) => th.fg("dim", line),
-      ),
+      ...wrapTextWithAnsi(
+        menu.kind === "agent"
+          ? "↑↓ choose · Enter open · Esc back"
+          : "↑↓ choose · Enter apply · Esc back",
+        innerWidth,
+      ).map((line) => th.fg("dim", line)),
     ];
     const edge = (left: string, right: string) =>
       th.fg("border", `${left}${"─".repeat(width - 2)}${right}`);
@@ -885,18 +865,14 @@ export class Dashboard implements Component, Focusable {
       const lines = [
         title,
         th.bold(
-          edit.action === "save-draft"
-            ? "Local reply draft · save never sends"
-            : `Reminders ${this.data.reminderList || "Next"} · save adds one action`,
+          `Reminders ${this.data.reminderList || "Next"} · save adds one action`,
         ),
         singleLine(`${edit.item.person} · ${edit.item.title}`),
         th.fg(
           "warning",
           edit.discard
             ? "Unsaved changes. Esc again discards; any other key keeps editing."
-            : edit.item.draftStale
-              ? "Source changed. Review the complete draft before saving."
-              : "",
+            : "",
         ),
         ...edit.editor.render(w),
       ];
@@ -908,12 +884,8 @@ export class Dashboard implements Component, Focusable {
           this.busy
             ? "Working · wait for the result before retrying"
             : edit.vimEnabled
-              ? edit.action === "add-next"
-                ? "Enter add · Esc NORMAL, then back"
-                : "Ctrl+S save · Enter newline · Esc NORMAL, then back"
-              : edit.action === "add-next"
-                ? "Enter add · Esc back"
-                : "Ctrl+S save · Enter newline · Esc back",
+              ? "Enter add · Esc NORMAL, then back"
+              : "Enter add · Esc back",
         ),
       );
       return this.frame(lines, width, height);
@@ -928,10 +900,6 @@ export class Dashboard implements Component, Focusable {
           : th.fg("dim", text);
       })
       .join(" ");
-    const draftNotice =
-      this.data.draftRunning || this.data.draftStatus?.key === this.selected
-        ? singleLine(this.data.draftStatus?.text || "")
-        : "";
     const lines = [
       title,
       healthLine,
@@ -984,16 +952,14 @@ export class Dashboard implements Component, Focusable {
       );
       while (lines.length < height - 2) lines.push("");
       lines.push(
-        th.fg("warning", this.notice || draftNotice),
+        th.fg("warning", this.notice),
         th.fg(
           "dim",
-          this.data.draftRunning
-            ? "Claude drafting · ^X cancel · Esc back"
-            : this.screen === "coverage"
-              ? "Up/Down scroll · ^L reload local · Esc back"
-              : w >= 60
-                ? `${!this.demo && item?.url ? "o original · " : ""}i ${this.detailExpanded ? "hide details" : "details"} · ↑↓ scroll · Enter actions · Esc list`
-                : "i info · ↑↓ · Enter actions · Esc",
+          this.screen === "coverage"
+            ? "Up/Down scroll · ^L reload local · Esc back"
+            : w >= 60
+              ? `${!this.demo && item?.url ? "o original · " : ""}i ${this.detailExpanded ? "hide details" : "details"} · ↑↓ scroll · Enter actions · Esc list`
+              : "i info · ↑↓ · Enter actions · Esc",
         ),
       );
       return this.frame(lines, width, height);
@@ -1042,7 +1008,6 @@ export class Dashboard implements Component, Focusable {
       th.fg(
         this.notice ? "warning" : "dim",
         this.notice ||
-          draftNotice ||
           (this.data.triageStatus ? singleLine(this.data.triageStatus) : "") ||
           `${this.selection + (list.length ? 1 : 0)}/${list.length} shown · Saved queue · ^L reload local`,
       ),
@@ -1050,15 +1015,13 @@ export class Dashboard implements Component, Focusable {
         "dim",
         this.busy
           ? "Working · wait for the result before retrying"
-          : this.data.draftRunning
-            ? "Claude drafting · ^X cancel · ^L reload local · Esc"
-            : this.data.triageRunning
-              ? "Claude triage running · ^X cancel · ^L reload local · Esc"
-              : `n Next · d Drop${this.data.canUndo ? " · u Undo" : ""} · / search · Enter details · ${
-                  w >= 110
-                    ? "Tab views · ^O source · ^R triage · ^G coverage · Esc"
-                    : "Tab · Esc"
-                }`,
+          : this.data.triageRunning
+            ? "Claude triage running · ^X cancel · ^L reload local · Esc"
+            : `n Next · d Drop${this.data.canUndo ? " · u Undo" : ""} · / search · Enter details · ${
+                w >= 110
+                  ? "Tab views · ^O source · ^R triage · ^G coverage · Esc"
+                  : "Tab · Esc"
+              }`,
       ),
     );
     return this.frame(lines, width, height);

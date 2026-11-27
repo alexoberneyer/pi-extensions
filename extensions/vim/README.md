@@ -4,9 +4,9 @@ A small Vim layer for Pi's existing prompt editor. No extra dependencies or
 Neovim configuration. Starts in INSERT and returns there after submitting,
 clearing or replacing a prompt. The bottom border shows INSERT or NORMAL.
 
-Comms uses the same editor for local replies and Next actions. There, Escape in
-NORMAL returns to Comms with its unsaved-change confirmation instead of
-interrupting Pi. Ctrl+S saves, Enter inserts a newline, and nothing is sent.
+Comms uses the same editor for Next actions. There, Escape in NORMAL returns
+to Comms with its unsaved-change confirmation instead of interrupting Pi.
+Enter adds the action to Reminders.
 
 ## Keys
 

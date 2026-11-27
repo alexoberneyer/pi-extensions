@@ -43,18 +43,12 @@ const { SessionManager } = await import(
 const { createEventBus } = await import(
   pathToFileURL(join(packageDir, "dist/core/event-bus.js"))
 );
-const { getThemeByName } = await import(
-  pathToFileURL(join(packageDir, "dist/modes/interactive/theme/theme.js"))
-);
-const { getKeybindings } = await import(
-  pathToFileURL(require.resolve("@earendil-works/pi-tui"))
-);
 const { runClaudeTriage, claimTriage, claudeArgs } = await jiti.import(
   join(source, "claude-triage.ts"),
 );
 const { parseTriage, mergeTriage, externalPrompt, triageSchema } =
   await jiti.import(join(source, "triage-protocol.ts"));
-const { decision, readTools, toolsFor, microsoftTool } = await import(
+const { decision, readTools } = await import(
   pathToFileURL(join(source, "triage-guard.mjs"))
 );
 const { emptyState, demoState, ingest, setDraft, errorMessage } =
@@ -114,7 +108,7 @@ const fs=require('node:fs');
 const dir=${JSON.stringify(dir)};
 let input='';
 process.stdin.on('data',chunk=>input+=chunk);
-process.stdin.on('end',async()=>{
+process.stdin.on('end',()=>{
  const options=JSON.parse(fs.readFileSync(dir+'/behavior.json','utf8'));
  fs.writeFileSync(dir+'/request.json',JSON.stringify({args:process.argv.slice(2),prompt:input,cwd:process.cwd(),claudecode:process.env.CLAUDECODE}));
  if(options.wait){
@@ -125,17 +119,8 @@ process.stdin.on('end',async()=>{
  }
  if(options.overflow){process.stdout.write('x'.repeat(17*1024*1024));return;}
  if(options.malformed){process.stdout.write('not json\\n');return;}
- if(options.deferred) while(!fs.existsSync(dir+'/release')) await new Promise(r=>setTimeout(r,10));
- let data=options.draft;
- if(!data){
-  const runId=input.match(/Run ID: ([^.\\s]+)/)[1];
-  data=options.data?{runId,...options.data}:{runId,results:[${JSON.stringify(result())}]};
- }
- for(const [index,name] of (options.reads||[]).entries()){
-  const id='fixture-read-'+index;
-  console.log(JSON.stringify({type:'assistant',message:{content:[{type:'tool_use',id,name,input:{}}]}}));
-  console.log(JSON.stringify({type:'user',message:{content:[{type:'tool_result',tool_use_id:id,is_error:options.badRead===name,content:'Synthetic evidence'}]}}));
- }
+ const runId=input.match(/Run ID: ([^.\\s]+)/)[1];
+ const data=options.data?{runId,...options.data}:{runId,results:[${JSON.stringify(result())}]};
  if(options.tool)console.log(JSON.stringify({type:'assistant',message:{content:[{type:'tool_use',name:options.tool,input:options.toolInput}]}}));
  const event={type:'result',subtype:options.subtype||'success',is_error:options.isError||false,structured_output:data,permission_denials:options.denied||[]};
  const line=JSON.stringify(event)+'\\n';
@@ -1276,7 +1261,7 @@ test("whitespace is normalized and Pi-native busy guidance never promises Claude
     await h.command(command);
     assert.equal(h.notifications.at(-1).level, "info");
     assert.match(h.notices.at(-1), /Pi-native triage.*Press Escape/);
-    assert.match(h.notices.at(-1), /\/comms cancel only stops Claude jobs/);
+    assert.match(h.notices.at(-1), /\/comms cancel only stops Claude triage/);
   }
   assert.equal(h.prompts.length, 1);
   assert.equal(existsSync(join(h.dir, "request.json")), false);
@@ -1295,213 +1280,7 @@ test("whitespace is normalized and Pi-native busy guidance never promises Claude
   await h.emit("agent_settled");
   await h.command(" cancel \t ");
   assert.equal(h.notifications.at(-1).level, "info");
-  assert.match(h.notices.at(-1), /No Claude job is running/);
-});
-
-test("draft busy guidance points to Escape without cancelling the Pi job", async (t) => {
-  const h = await externalHarness(t);
-  writeFileSync(
-    join(h.ctx.cwd, ".claude/commands/message.md"),
-    "Fixture draft instructions",
-  );
-  h.store.update((state) =>
-    ingest(state, "calendar", "work", [item()], "complete", "all", first),
-  );
-  h.ctx.ui.custom = async () => ({
-    action: "draft-ai",
-    item: h.store.read().items[0],
-    view: { view: 0, search: "" },
-  });
-  await h.command("");
-  assert.equal(h.prompts.length, 1);
-  for (const command of ["refresh", "cancel"]) {
-    await h.command(command);
-    assert.equal(h.notifications.at(-1).level, "info");
-    assert.match(h.notices.at(-1), /drafting.*Press Escape/);
-  }
-  assert.equal(h.prompts.length, 1);
-  assert.equal(existsSync(join(h.dir, "request.json")), false);
-  await h.emit("agent_settled");
-});
-
-const verifiedReads = [microsoftTool("get_me"), microsoftTool("read_resource")];
-const localReply = {
-  status: "draft",
-  text: "Synthetic reply\n\nFor local review only.",
-};
-
-async function draftHarness(t, behavior, { source = "mail", saved = "" } = {}) {
-  const h = await externalHarness(t, {
-    reads: verifiedReads,
-    draft: localReply,
-    ...behavior,
-  });
-  const voice = join(h.dir, "voice.md");
-  const config = join(h.dir, "public-config.json");
-  writeFileSync(voice, "SYNTHETIC VOICE RULE");
-  writeFileSync(
-    config,
-    JSON.stringify({ comms: { voiceInstructions: voice } }),
-  );
-  env(t, "PI_EXTENSIONS_CONFIG", config);
-  h.store.update((state) => {
-    ingest(
-      state,
-      source,
-      "work@example.invalid",
-      [item(), { ...item("exclude-other-request"), priority: 2 }],
-      "complete",
-      "all",
-      first,
-    );
-    if (saved) setDraft(state, state.items[0].key, 0, saved);
-  });
-  h.ctx.ui.custom = (factory) =>
-    new Promise((done) => {
-      h.view = factory(
-        { terminal: { columns: 120, rows: 30 }, requestRender() {} },
-        getThemeByName("dark"),
-        getKeybindings(),
-        done,
-      );
-    });
-  const opened = h.command("");
-  await until(() => h.view);
-  t.after(async () => {
-    await h.emit("session_shutdown");
-    await opened;
-  });
-  const keys = (...keys) => keys.forEach((key) => h.view.handleInput(key));
-  h.render = () => h.view.render(120).join("\n");
-  h.startDraft = () => {
-    keys("\r", "\r", "\x1b[B", "\r");
-    if (saved) keys("\x1b[B", "\r");
-  };
-  h.cancelDraft = () => keys("\x18");
-  h.waitForDraft = (pattern) => until(() => pattern.test(h.render()));
-  return h;
-}
-
-test("Claude drafts only the selected request and saves it in the open queue", async (t) => {
-  const h = await draftHarness(
-    t,
-    {},
-    { source: "teams", saved: "EXCLUDE OLD DRAFT" },
-  );
-  h.startDraft();
-  await h.waitForDraft(/Claude draft saved locally/);
-  const call = JSON.parse(readFileSync(join(h.dir, "request.json"), "utf8"));
-  assert.match(call.prompt, /SYNTHETIC VOICE RULE/);
-  assert.match(call.prompt, /"sourceId":"one"/);
-  assert.doesNotMatch(call.prompt, /exclude-other-request|EXCLUDE OLD DRAFT/);
-  assert.deepEqual(
-    call.args[call.args.indexOf("--allowedTools") + 1].split(","),
-    toolsFor("teams"),
-  );
-  assert.ok(call.args.includes("--no-session-persistence"));
-  assert.equal(h.store.read().items[0].draft, localReply.text);
-  assert.equal(h.store.read().items[0].draftOrigin, "ai");
-  assert.equal(h.store.read().items[0].status, "open");
-  assert.equal(h.prompts.length, 0);
-});
-
-for (const [label, behavior, message] of [
-  [
-    "already answered",
-    { draft: { status: "blocked", text: "Someone already answered." } },
-    /Someone already answered/,
-  ],
-  [
-    "failed verification",
-    { badRead: microsoftTool("read_resource") },
-    /did not verify/,
-  ],
-  [
-    "unexpected write",
-    { tool: microsoftTool("outlook_create_reply_draft") },
-    /outside the Comms read allowlist/,
-  ],
-  [
-    "invalid result",
-    { draft: { status: "draft", text: " \n " } },
-    /invalid draft result/,
-  ],
-]) {
-  test(`Claude drafting leaves the queue unchanged on ${label}`, async (t) => {
-    const h = await draftHarness(t, behavior, { saved: "Keep this draft." });
-    const before = readFileSync(h.store.file, "utf8");
-    h.startDraft();
-    await h.waitForDraft(message);
-    assert.equal(readFileSync(h.store.file, "utf8"), before);
-  });
-}
-
-test("the draft hook blocks write tools and reads for other sources before execution", () => {
-  for (const [mode, allowed, denied] of [
-    ["mail", "outlook_email_search", "chat_message_search"],
-    ["teams", "chat_message_search", "outlook_email_search"],
-  ]) {
-    for (const [name, expected] of [
-      [allowed, "allow"],
-      [denied, "deny"],
-      ["outlook_create_reply_draft", "deny"],
-      ["teams_send_chat_message", "deny"],
-    ]) {
-      const output = execFileSync(
-        process.execPath,
-        [join(source, "triage-guard.mjs"), mode],
-        {
-          input: JSON.stringify({ tool_name: microsoftTool(name) }),
-          encoding: "utf8",
-        },
-      );
-      assert.equal(
-        JSON.parse(output).hookSpecificOutput.permissionDecision,
-        expected,
-      );
-    }
-  }
-});
-
-for (const update of ["draft", "source"]) {
-  test(`Claude does not replace a concurrent ${update} update`, async (t) => {
-    const h = await draftHarness(t, { deferred: true });
-    h.startDraft();
-    await waitFor(join(h.dir, "request.json"));
-    h.store.update((state) => {
-      if (update === "draft")
-        setDraft(state, state.items[0].key, 0, "Concurrent edit");
-      else
-        ingest(
-          state,
-          "mail",
-          "work@example.invalid",
-          [item("one", second)],
-          "complete",
-          "new message",
-          second,
-        );
-    });
-    const after = readFileSync(h.store.file, "utf8");
-    writeFileSync(join(h.dir, "release"), "");
-    await h.waitForDraft(/Request or draft changed/);
-    assert.equal(readFileSync(h.store.file, "utf8"), after);
-  });
-}
-
-test("Ctrl+X cancels a Claude draft in the detail view without changing the queue", async (t) => {
-  const h = await draftHarness(t, { wait: true });
-  const before = readFileSync(h.store.file, "utf8");
-  h.startDraft();
-  await waitFor(join(h.dir, "pid"));
-  await h.waitForDraft(/\^X cancel/);
-  h.cancelDraft();
-  await h.waitForDraft(/Claude drafting cancelled/);
-  assert.equal(readFileSync(h.store.file, "utf8"), before);
-  assert.throws(
-    () => process.kill(Number(readFileSync(join(h.dir, "pid"), "utf8")), 0),
-    { code: "ESRCH" },
-  );
+  assert.match(h.notices.at(-1), /No Claude triage is running/);
 });
 
 test("an already-aborted refresh never starts a process", async (t) => {

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Draft with Claude reads the selected Outlook or Teams thread and saves an unsent reply in Comms. It never writes to Microsoft 365 or replaces a saved draft without confirmation.
+- Pick Claude, Pi or Codex in a popup over the Comms thread. The agent opens blank in a focused tmux split and the selected context is copied for manual paste. This replaces inline reply editing and on-demand AI drafting. Existing drafts and triage proposals stay readable and travel with the context.
 - Add `voice.normalAfterInsert` to enter Vim NORMAL after dictation inserts the final text.
 - Add `ciw` to change the whole word under the cursor and `yiw` to copy it from the macOS prompt.
 - Count down the final 10 seconds of each Voice recording in the widget.

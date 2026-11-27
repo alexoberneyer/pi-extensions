@@ -1,7 +1,7 @@
 // Local launcher and terminal runner. Importing performs no I/O.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { fstatSync, realpathSync } from "node:fs";
 import {
   mkdtemp,
   readFile,
@@ -35,14 +35,20 @@ export function isResumeId(value) {
   );
 }
 
-function resumeProfile(agent) {
-  const key = agent === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
+const profileKeys = {
+  claude: "CLAUDE_CONFIG_DIR",
+  codex: "CODEX_HOME",
+  pi: "PI_CODING_AGENT_DIR",
+};
+
+function agentProfile(agent) {
+  const key = profileKeys[agent];
   const value = process.env[key];
   return { key, path: value ? resolve(value) : null };
 }
 
 export function resumeSessionName(agent, id) {
-  const profile = resumeProfile(agent);
+  const profile = agentProfile(agent);
   let root = profile.path ?? join(homedir(), `.${agent}`);
   try {
     root = realpathSync(root);
@@ -55,6 +61,25 @@ export function resumeSessionName(agent, id) {
   return `job-${hash.slice(0, 32)}`;
 }
 
+function splitOrigin() {
+  const match = process.env.TMUX?.match(/^(.*),([1-9]\d*),(\d+)$/);
+  const pane = process.env.TMUX_PANE;
+  if (
+    !match ||
+    !isAbsolute(match[1]) ||
+    /[\x00-\x1f\x7f]/.test(match[1]) ||
+    !/^%\d+$/.test(pane || "") ||
+    !process.stdin.isTTY ||
+    !process.stdout.isTTY
+  )
+    return undefined;
+  return { socket: match[1], pid: match[2], session: `$${match[3]}`, pane };
+}
+
+export function canLaunchSplit() {
+  return process.platform === "darwin" && Boolean(splitOrigin());
+}
+
 export async function launchLocal(
   { agent, cwd, task, terminal = "ghostty", name, resumeId },
   signal,
@@ -63,9 +88,14 @@ export async function launchLocal(
     throw new Error("Local launching requires macOS.");
   if (!["pi", "claude", "codex"].includes(agent))
     throw new Error("Unknown agent. Use pi, claude or codex.");
-  if (!["ghostty", "tmux"].includes(terminal))
+  if (!["ghostty", "tmux", "split"].includes(terminal))
     throw new Error("Choose Ghostty or tmux for local launching.");
   const resume = resumeId !== undefined;
+  const split = terminal === "split" ? splitOrigin() : undefined;
+  if (terminal === "split" && (!split || resume || task !== ""))
+    throw new Error(
+      "Open in split requires the current local tmux pane and a blank agent. Use Copy context instead.",
+    );
   if (resume) {
     if (
       terminal !== "tmux" ||
@@ -101,7 +131,7 @@ export async function launchLocal(
   signal?.throwIfAborted();
   const executable = await findExecutable(agent, signal);
   const tmux =
-    terminal === "tmux" ? await findExecutable("tmux", signal) : undefined;
+    terminal !== "ghostty" ? await findExecutable("tmux", signal) : undefined;
 
   // Task text and resume IDs are data, never AppleScript or shell source. The
   // terminal runner consumes this private handoff before starting the agent.
@@ -116,11 +146,12 @@ export async function launchLocal(
         cwd,
         task,
         path: process.env.PATH,
+        ...(split && { profile: agentProfile(agent) }),
         ...(resume && {
           resume: {
             agent,
             id: resumeId.toLowerCase(),
-            profile: resumeProfile(agent),
+            profile: agentProfile(agent),
           },
         }),
       }),
@@ -128,6 +159,82 @@ export async function launchLocal(
     );
     signal?.throwIfAborted();
     const runner = [process.execPath, fileURLToPath(import.meta.url), file];
+    if (split && tmux) {
+      const { socket, pane, pid, session } = split;
+      const format =
+        "#{pid} #{session_id} #{pane_id} #{window_linked} #{window_active} #{pane_active} #{session_attached} #{pane_dead}";
+      const expected = `${pid} ${session} ${pane} 0 1 1 1 0`;
+      const { stdout } = await runProcess(
+        tmux,
+        [
+          "-S",
+          socket,
+          "display-message",
+          "-p",
+          "-t",
+          pane,
+          `${format}\t#{pane_tty}`,
+        ],
+        { signal },
+      );
+      const [actual, tty] = stdout.trim().split("\t");
+      const device =
+        tty && /^\/dev\/[\w/.-]+$/.test(tty) ? await stat(tty) : undefined;
+      if (
+        actual !== expected ||
+        !device?.isCharacterDevice() ||
+        device.rdev !== fstatSync(process.stdin.fd).rdev ||
+        device.rdev !== fstatSync(process.stdout.fd).rdev
+      )
+        throw new Error(
+          "Cannot verify the current active tmux pane. Use Copy context instead.",
+        );
+      // Recheck the source and focus in tmux's own queue. The split has no -d:
+      // focus moves to the new right pane, without leaving this window.
+      const guard = `#{==:${format} #{pane_tty},${expected} ${tty}}`;
+      const command = [
+        "split-window",
+        "-h",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        pane,
+        "-c",
+        cwd,
+        ...runner,
+      ]
+        .map(quote)
+        .join(" ");
+      signal?.throwIfAborted();
+      submitted = true;
+      const result = await runProcess(
+        tmux,
+        [
+          "-S",
+          socket,
+          "if-shell",
+          "-F",
+          "-t",
+          pane,
+          guard,
+          command,
+          "display-message -p not-current",
+        ],
+        { signal },
+      );
+      const opened = result.stdout.trim();
+      if (opened === "not-current") {
+        submitted = false;
+        throw new Error("The active tmux pane changed. Open from Comms again.");
+      }
+      if (!/^%\d+$/.test(opened))
+        throw new Error("tmux did not confirm the split.");
+      return {
+        message: "Opened a split in the current tmux window.",
+        tmux: { socket, session, pane: opened },
+      };
+    }
     submitted = true;
     if (tmux) {
       // Multiple command arguments bypass tmux's shell parsing. The command
@@ -204,9 +311,11 @@ export async function launchLocal(
     if (!submitted) await rm(directory, { recursive: true, force: true });
     // A lost launcher reply may still have started the runner. Keep its
     // handoff readable rather than breaking a process that is about to start.
-    const warning = tmux
-      ? `A tmux session may have started. Check tmux list-sessions before retrying. Attach if present: ${quote(tmux)} attach-session -t ${quote(`=${name}`)}`
-      : "A window may have opened. Check Ghostty before retrying.";
+    const warning = split
+      ? "A split may have opened. Check the current tmux window before retrying."
+      : tmux
+        ? `A tmux session may have started. Check tmux list-sessions before retrying. Attach if present: ${quote(tmux)} attach-session -t ${quote(`=${name}`)}`
+        : "A window may have opened. Check Ghostty before retrying.";
     throw new Error(
       `${error.message}${submitted ? `\n${warning}\nUnconsumed handoff: ${file}` : ""}`,
     );
@@ -241,7 +350,7 @@ async function runAgent(file) {
   let args;
   if (request.resume) {
     const { agent, id, profile } = request.resume;
-    const key = agent === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
+    const key = profileKeys[agent];
     if (
       !["claude", "codex"].includes(agent) ||
       !isResumeId(id) ||
@@ -253,6 +362,13 @@ async function runAgent(file) {
     else env[key] = profile.path;
     args = agent === "claude" ? ["--resume", id] : ["resume", id];
   } else {
+    if (request.profile) {
+      const { key, path } = request.profile;
+      if (!Object.values(profileKeys).includes(key))
+        throw new Error("Invalid agent profile.");
+      if (path === null) delete env[key];
+      else env[key] = path;
+    }
     // A prefix also prevents Pi from treating a leading @path as an attachment.
     args = request.task.trim()
       ? ["--", `Do the following task:\n\n${request.task}`]

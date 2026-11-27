@@ -4,22 +4,25 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { packagePath, readConfig } from "../../lib/config.mjs";
-import { approvalStatus, initializeApproval } from "../approval/ready.ts";
+import { initializeApproval } from "../approval/ready.ts";
 import {
   copyToClipboard,
   getAgentDir,
   type ExtensionAPI,
   type ExtensionCommandContext,
-  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { canLaunchSplit, launchLocal } from "../../bin/agent-launch.mjs";
+import {
+  handoffContext,
+  isHandoffAgent,
+  type HandoffAgent,
+} from "./agent-handoff.ts";
 import {
   Dashboard,
   type ActionRequest,
   type ActionResult,
-  type Choice,
-  type DashboardData,
   type ViewState,
 } from "./dashboard.ts";
 import {
@@ -33,7 +36,6 @@ import {
   errorMessage,
   ingest,
   itemRef,
-  setDraft,
   collectionSources,
   legacySources,
   undo,
@@ -49,7 +51,6 @@ import {
 } from "./state.ts";
 import { Store } from "./store.ts";
 import { claimTriage, runClaudeTriage } from "./claude-triage.ts";
-import { runClaudeDraft } from "./claude-draft.ts";
 import {
   candidateSchema,
   duplicateSchema,
@@ -58,13 +59,12 @@ import {
 } from "./triage-protocol.ts";
 import { openSourceLink } from "./source-link.ts";
 import {
-  canonical,
   collectedCoverage,
-  draftPrompt,
   notesDirectory,
   refreshPrompt,
   reminderArguments,
   snoozeUntil,
+  triageInstructions,
   voiceInstructions,
 } from "./workflow.ts";
 
@@ -73,19 +73,16 @@ const commandHelp = `Comms commands:
 /comms: open the saved queue
 /comms refresh: collect through Claude
 /comms refresh pi: collect in this Pi conversation
-/comms cancel: stop this session's Claude triage or draft
+/comms cancel: stop this session's Claude collector
 /comms status: show coverage and failures
 /comms demo: open disposable demo data
 /comms help: show this help`;
-type Job =
-  | {
-      kind: "refresh";
-      id: string;
-      startedAt: string;
-      state: State;
-      completed: Set<string>;
-    }
-  | { kind: "draft"; key: string; revision: number; revoked?: boolean };
+type Job = {
+  id: string;
+  startedAt: string;
+  state: State;
+  completed: Set<string>;
+};
 function result(value: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value) }],
@@ -95,7 +92,7 @@ function result(value: unknown) {
 
 export default async function comms(pi: ExtensionAPI) {
   await initializeApproval(pi);
-  const toolNames = ["comms_snapshot", "comms_ingest", "comms_save_draft"];
+  const toolNames = ["comms_snapshot", "comms_ingest"];
   const authorized = new Set<string>();
   function activateTools(...names: string[]): void {
     for (const name of names) authorized.add(name);
@@ -110,93 +107,23 @@ export default async function comms(pi: ExtensionAPI) {
   let job: Job | undefined;
   let external:
     | {
-        kind: "triage" | "draft";
         controller: AbortController;
         status: string;
         finished: Promise<void>;
       }
     | undefined;
   let triageStatus = "";
-  let draftStatus: DashboardData["draftStatus"];
   let refreshDashboard: (() => void) | undefined;
   let browsing = false;
   let active = true;
   let closeView: (() => void) | undefined;
   let subprocess: AbortController | undefined;
+  let handoff: AbortController | undefined;
   let planning = false;
   let savedView: ViewState = { view: 0, search: "" };
   // Decisions made in this Pi session, newest last. u undoes them in turn.
   let undos: Undo[] = [];
   const store = () => new Store(join(getAgentDir(), "comms"));
-  let returnToQueue:
-    | {
-        id: string;
-        sessionId: string;
-        prompt: string;
-        revoked: boolean;
-        notice?: string;
-      }
-    | undefined;
-  let queuedReturn: typeof returnToQueue;
-  let queueNotice = "";
-  let uiWaiting = false;
-  function revokeReturn(): void {
-    if (job?.kind === "draft") job.revoked = true;
-    if (returnToQueue) returnToQueue.revoked = true;
-    queuedReturn = undefined;
-  }
-  function safeReturn(ctx: ExtensionContext, sessionId: string): boolean {
-    const approval = approvalStatus(pi);
-    return (
-      approval?.ready === true &&
-      !approval.planning &&
-      active &&
-      !planning &&
-      !external &&
-      !job &&
-      !browsing &&
-      !uiWaiting &&
-      ctx.mode === "tui" &&
-      ctx.isIdle() &&
-      ctx.sessionManager.getSessionId() === sessionId &&
-      !ctx.hasPendingMessages() &&
-      !ctx.ui.getEditorText().trim()
-    );
-  }
-  pi.on("input", (event) => {
-    queuedReturn = undefined;
-    if (
-      returnToQueue &&
-      !(event.source === "extension" && event.text === returnToQueue.prompt)
-    )
-      revokeReturn();
-  });
-  pi.on("before_agent_start", (event) => {
-    queuedReturn = undefined;
-    const prompt =
-      event.messageType === "user"
-        ? event.prompt
-        : event.message?.customType === "comms-selected-action"
-          ? event.message.content
-          : undefined;
-    if (returnToQueue && prompt !== returnToQueue.prompt) revokeReturn();
-  });
-  pi.on("ui_prompt_start", () => {
-    uiWaiting = true;
-  });
-  pi.on("ui_prompt_end", () => {
-    uiWaiting = false;
-  });
-  pi.on("user_bash", () => {
-    revokeReturn();
-  });
-  pi.on("message_end", (event) => {
-    if (
-      event.message.role === "assistant" &&
-      ["error", "aborted"].includes(event.message.stopReason)
-    )
-      revokeReturn();
-  });
   for (const event of [
     "session_before_switch",
     "session_before_fork",
@@ -204,15 +131,12 @@ export default async function comms(pi: ExtensionAPI) {
     "session_tree",
   ] as const)
     pi.on(event, () => {
-      revokeReturn();
-      if (external?.kind === "draft") external.controller.abort();
+      handoff?.abort();
     });
 
   pi.events.on("dotfiles:plan-mode", (value) => {
     planning = value === true;
-    if (!planning) return;
-    revokeReturn();
-    if (external?.kind === "draft") external.controller.abort();
+    if (planning) handoff?.abort();
   });
   pi.on("session_start", () => {
     active = true;
@@ -221,41 +145,20 @@ export default async function comms(pi: ExtensionAPI) {
   });
   pi.on("session_shutdown", async () => {
     active = false;
-    revokeReturn();
-    returnToQueue = undefined;
     deactivateTools();
     job = undefined;
     closeView?.();
     subprocess?.abort();
+    handoff?.abort();
     external?.controller.abort();
     await external?.finished;
   });
-  pi.on("agent_settled", (event, ctx) => {
-    const back = returnToQueue;
-    if (back && job?.kind === "draft") {
-      back.notice =
-        "AI drafting finished. Review the saved local text; nothing was sent.";
-      if (job.revoked) back.revoked = true;
-    }
+  pi.on("agent_settled", () => {
     job = undefined;
-    returnToQueue = undefined;
-    deactivateTools(toolNames.filter((name) => name !== "comms_snapshot"));
-    if (
-      !back ||
-      back.revoked ||
-      event.aborted ||
-      !safeReturn(ctx, back.sessionId)
-    )
-      return;
-    queuedReturn = back;
-    // Command dispatch is deferred until every settled handler has finished.
-    // The command rechecks idle/input/session state before showing an overlay.
-    pi.sendUserMessage(`/comms return ${back.id}`, {
-      expandPromptTemplates: true,
-    });
+    deactivateTools(["comms_ingest"]);
   });
 
-  // The triage/drafting pass cannot perform external writes, including nested
+  // The triage pass cannot perform external writes, including nested
   // codemode calls. This guard is a workflow boundary, not an OS sandbox.
   pi.on("tool_call", (event) => {
     if (
@@ -269,7 +172,6 @@ export default async function comms(pi: ExtensionAPI) {
       };
     if (!job) return;
     if (
-      job.kind === "refresh" &&
       /(?:^|__)notion[-_]fetch$/.test(event.toolName) &&
       event.input.include_transcript !== undefined &&
       event.input.include_transcript !== false
@@ -282,7 +184,6 @@ export default async function comms(pi: ExtensionAPI) {
       [
         "comms_snapshot",
         "comms_ingest",
-        "comms_save_draft",
         "read",
         "grep",
         "find",
@@ -305,7 +206,7 @@ export default async function comms(pi: ExtensionAPI) {
     return {
       block: true,
       reason:
-        "Comms collection/drafting is read-only. Unclassified tools and external writes are blocked. Finish this pass, then copy the draft and open the original.",
+        "Comms collection is read-only. Unclassified tools and external writes are blocked.",
     };
   });
 
@@ -324,7 +225,7 @@ export default async function comms(pi: ExtensionAPI) {
         );
       const state = store().read();
       return result(
-        job?.kind === "refresh"
+        job
           ? {
               ...state,
               // Collectors see only sources they can refresh, each with the
@@ -366,7 +267,7 @@ export default async function comms(pi: ExtensionAPI) {
         !active ||
         !authorized.has("comms_ingest") ||
         planning ||
-        job?.kind !== "refresh" ||
+        !job ||
         args.runId !== job.id
       )
         throw new Error(
@@ -417,46 +318,17 @@ export default async function comms(pi: ExtensionAPI) {
       });
     },
   });
-  pi.registerTool({
-    name: "comms_save_draft",
-    defaultActive: false,
-    label: "Save local reply",
-    description:
-      "Save a local plain-text suggestion for the item selected by the user in /comms. Does not create an Outlook draft or send a message.",
-    parameters: Type.Object({
-      key: Type.String(),
-      expectedRevision: Type.Integer(),
-      draft: Type.String({ maxLength: 20000 }),
-    }),
-    async execute(_id, args) {
-      if (
-        !active ||
-        !authorized.has("comms_save_draft") ||
-        planning ||
-        job?.kind !== "draft" ||
-        job.revoked ||
-        job.key !== args.key ||
-        job.revision !== args.expectedRevision
-      )
-        throw new Error("Select Draft with AI in /comms first.");
-      store().update((state) =>
-        setDraft(state, args.key, args.expectedRevision, args.draft, "ai"),
-      );
-      return result({ saved: true, sent: false });
-    },
-  });
-
   function runningJob(): string | undefined {
     if (external)
-      return `${external.status}\nClaude ${external.kind === "draft" ? "drafting" : "triage"} is already running. Use /comms cancel to stop it.`;
+      return `${external.status}\nClaude triage is already running. Use /comms cancel to stop it.`;
     if (job)
-      return `Comms ${job.kind === "draft" ? "drafting" : "Pi-native triage"} is already running in Pi. Press Escape in Pi to stop it. /comms cancel only stops Claude jobs.`;
+      return "Comms Pi-native triage is already running in Pi. Press Escape in Pi to stop it. /comms cancel only stops Claude triage.";
     return undefined;
   }
   function canStart(ctx: ExtensionCommandContext): void {
     if (planning)
       throw new Error(
-        "Leave /plan mode before refreshing, drafting or adding a task.",
+        "Leave /plan mode before refreshing, opening an agent or adding a task.",
       );
     const busy = runningJob();
     if (busy) throw new Error(busy);
@@ -477,7 +349,7 @@ export default async function comms(pi: ExtensionAPI) {
     if (busy) return busy;
     const queue = store();
     const requestState = queue.read();
-    const instructions = readFileSync(canonical("triage"), "utf8");
+    const instructions = readFileSync(triageInstructions(), "utf8");
     const voice = voiceInstructions();
     if (voice.warning) ctx.ui.notify(voice.warning, "warning");
     const release = claimTriage(queue.directory);
@@ -485,7 +357,6 @@ export default async function comms(pi: ExtensionAPI) {
     const runId = randomUUID();
     const startedAt = new Date().toISOString();
     const current = {
-      kind: "triage" as const,
       controller,
       status: "Claude triage starting · /comms cancel stops it",
       finished: Promise.resolve(),
@@ -552,23 +423,19 @@ export default async function comms(pi: ExtensionAPI) {
   }
   function cancelClaude(): string | undefined {
     if (!external)
-      return runningJob() || "No Claude job is running in this Pi session.";
-    const label = external.kind === "draft" ? "drafting" : "triage";
-    external.status = `Cancelling Claude ${label}. Waiting for its process to exit.`;
-    if (external.kind === "triage") triageStatus = external.status;
-    else if (draftStatus)
-      draftStatus = { ...draftStatus, text: external.status };
+      return runningJob() || "No Claude triage is running in this Pi session.";
+    triageStatus = external.status =
+      "Cancelling Claude triage. Waiting for its process to exit.";
     external.controller.abort();
     refreshDashboard?.();
   }
   function startRefresh(ctx: ExtensionCommandContext): void {
     canStart(ctx);
-    const file = canonical("triage");
+    const file = triageInstructions();
     const state = store().read();
     const voice = voiceInstructions();
     if (voice.warning) ctx.ui.notify(voice.warning, "warning");
     const current: Job = {
-      kind: "refresh",
       id: randomUUID(),
       startedAt: new Date().toISOString(),
       state,
@@ -584,97 +451,6 @@ export default async function comms(pi: ExtensionAPI) {
       job = undefined;
       throw error;
     }
-  }
-  function sendSelectedAction(prompt: string): void {
-    // Custom turns enter Pi's run lifecycle before model/auth errors. Unlike
-    // sendUserMessage's async preflight, those failures settle and release claims.
-    pi.sendMessage(
-      { customType: "comms-selected-action", content: prompt, display: true },
-      { triggerTurn: true },
-    );
-  }
-  function startDraft(ctx: ExtensionCommandContext, item: Item): void {
-    canStart(ctx);
-    const file = canonical("message");
-    const prompt = draftPrompt(item, file);
-    job = { kind: "draft", key: item.key, revision: item.draftRevision };
-    returnToQueue = {
-      id: randomUUID(),
-      sessionId: ctx.sessionManager.getSessionId(),
-      prompt,
-      revoked: false,
-    };
-    try {
-      activateTools("comms_snapshot", "comms_save_draft");
-      sendSelectedAction(prompt);
-    } catch (error) {
-      job = undefined;
-      returnToQueue = undefined;
-      deactivateTools(["comms_save_draft"]);
-      throw error;
-    }
-  }
-  function startClaudeDraft(ctx: ExtensionCommandContext, item: Item): void {
-    canStart(ctx);
-    const cwd = notesDirectory(false) || packagePath();
-    const voice = voiceInstructions();
-    if (voice.warning) ctx.ui.notify(voice.warning, "warning");
-    const queue = store();
-    const current = {
-      kind: "draft" as const,
-      controller: new AbortController(),
-      status: "Claude drafting · checking the live thread",
-      finished: Promise.resolve(),
-    };
-    const { signal } = current.controller;
-    external = current;
-    const publish = (text: string) => {
-      current.status = clean(text, 340);
-      draftStatus = { key: item.key, text: current.status };
-      if (active) refreshDashboard?.();
-    };
-    publish(current.status);
-    ctx.ui.setStatus("comms-draft", "Claude drafting · /comms cancel stops it");
-    current.finished = (async () => {
-      try {
-        const result = await runClaudeDraft({
-          cwd,
-          item,
-          voice: voice.text,
-          signal,
-          progress: publish,
-        });
-        signal.throwIfAborted();
-        if (!active) return;
-        if (result.status === "blocked") {
-          publish(`Claude could not draft: ${result.text}`);
-          return;
-        }
-        queue.update((state) => {
-          const latest = state.items.find((row) => row.key === item.key);
-          if (!isDeepStrictEqual(latest, item))
-            throw new Error(
-              "Request or draft changed. Claude did not replace it.",
-            );
-          setDraft(state, item.key, item.draftRevision, result.text, "ai");
-        });
-        publish("Claude draft saved locally. Nothing sent.");
-      } catch (error) {
-        publish(
-          signal.aborted
-            ? "Claude drafting cancelled. Local draft unchanged."
-            : errorMessage(error, 340),
-        );
-      } finally {
-        if (external === current) external = undefined;
-        if (active) {
-          ctx.ui.setStatus("comms-draft", undefined);
-          if (!refreshDashboard && draftStatus)
-            ctx.ui.notify(draftStatus.text, "info");
-          refreshDashboard?.();
-        }
-      }
-    })();
   }
   async function reminders(titles: string[], list: string): Promise<unknown> {
     if (process.platform !== "darwin")
@@ -701,6 +477,35 @@ export default async function comms(pi: ExtensionAPI) {
       if (subprocess === controller) subprocess = undefined;
     }
   }
+  async function openAgentSplit(
+    ctx: ExtensionCommandContext,
+    selected: Item,
+    agent: HandoffAgent,
+  ): Promise<string> {
+    canStart(ctx);
+    if (!canLaunchSplit())
+      throw new Error("Open in split requires local tmux. Use Copy context.");
+    const controller = new AbortController();
+    const { signal } = controller;
+    handoff = controller;
+    try {
+      const cwd = notesDirectory(false) || ctx.cwd;
+      await copyToClipboard(handoffContext(selected));
+      signal.throwIfAborted();
+      try {
+        await launchLocal({ agent, cwd, task: "", terminal: "split" }, signal);
+      } catch (error) {
+        if (signal.aborted) return "";
+        return `Context copied. ${errorMessage(error, 240)}`;
+      }
+      return "Context copied. Paste into the new agent when ready.";
+    } catch (error) {
+      if (signal.aborted) return "";
+      throw error;
+    } finally {
+      handoff = undefined;
+    }
+  }
   async function browse(
     ctx: ExtensionCommandContext,
     demo: boolean,
@@ -710,9 +515,7 @@ export default async function comms(pi: ExtensionAPI) {
     let memory = demoState();
     // Demo decisions never mix with the real undo history.
     const history: Undo[] = demo ? [] : undos;
-    let view: ViewState = demo ? { view: 0, search: "" } : savedView;
-    let notice = demo ? "" : queueNotice;
-    if (!demo) queueNotice = "";
+    const view: ViewState = demo ? { view: 0, search: "" } : savedView;
     const read = () => (demo ? structuredClone(memory) : store().read());
     const update = (change: (state: State) => void) => {
       if (demo) change(memory);
@@ -722,9 +525,8 @@ export default async function comms(pi: ExtensionAPI) {
       state: read(),
       reminderList: list,
       triageStatus: demo ? undefined : triageStatus,
-      triageRunning: !demo && external?.kind === "triage",
-      draftStatus: demo ? undefined : draftStatus,
-      draftRunning: !demo && external?.kind === "draft",
+      triageRunning: !demo && Boolean(external),
+      canSplit: !demo && canLaunchSplit(),
       canUndo: history.length > 0,
       notice: message,
       select,
@@ -758,6 +560,7 @@ export default async function comms(pi: ExtensionAPI) {
       action,
       item,
       text,
+      agent,
     }: ActionRequest): Promise<ActionResult> => {
       if (!active) throw new Error("This Comms view has closed.");
       if (action === "refresh" || action === "cancel-claude") {
@@ -795,21 +598,23 @@ export default async function comms(pi: ExtensionAPI) {
         );
       }
       const current = currentItem(item);
-      if (action === "draft-claude" || action === "replace-draft-claude") {
-        if (demo) throw new Error("Demo cannot draft with Claude.");
-        if (current.source !== "mail" && current.source !== "teams")
-          throw new Error(
-            "Claude reply drafting requires a mail or Teams item.",
-          );
-        if (current.draft && action !== "replace-draft-claude")
-          throw new Error("Confirm before replacing the saved draft.");
-        startClaudeDraft(ctx, current);
-        return snapshot();
-      }
-      if (action === "copy") {
-        if (!current.draft) throw new Error("No draft yet.");
-        await copyToClipboard(current.draft);
-        return snapshot("Draft copied. Nothing sent.");
+      if (action === "copy-context" || action === "open-agent-split") {
+        if (
+          demo ||
+          !collectionSources.includes(
+            current.source as (typeof collectionSources)[number],
+          )
+        )
+          throw new Error("This item does not support an agent handoff.");
+        if (!isDeepStrictEqual(current, item))
+          throw new Error("The request changed. Open the current item again.");
+        if (action === "open-agent-split") {
+          if (!isHandoffAgent(agent))
+            throw new Error("Choose a supported agent.");
+          return snapshot(await openAgentSplit(ctx, current, agent));
+        }
+        await copyToClipboard(handoffContext(current));
+        return snapshot("Context copied. Paste it into an agent's prompt.");
       }
       if (
         demo &&
@@ -837,13 +642,6 @@ export default async function comms(pi: ExtensionAPI) {
       }
       if (planning)
         throw new Error("Leave /plan mode before changing Comms items.");
-      if (action === "save-draft") {
-        if (text === undefined) throw new Error("Missing draft text.");
-        update((state) =>
-          setDraft(state, current.key, current.draftRevision, text),
-        );
-        return snapshot("Local draft saved. Nothing sent.");
-      }
       if (action === "add-next") {
         canStart(ctx);
         const normalized = clean(text || "", 2000)
@@ -921,75 +719,48 @@ export default async function comms(pi: ExtensionAPI) {
       if (entry) history.push(entry);
       return snapshot(`${outcomes[action as keyof typeof outcomes]} u undoes.`);
     };
-    while (active) {
-      let dashboard: Dashboard | undefined;
-      let choice: Choice | undefined;
-      try {
-        choice = await ctx.ui.custom<Choice | undefined>(
-          (tui, theme, keys, done) => {
-            closeView = () => done(undefined);
-            dashboard = new Dashboard(
-              tui,
-              theme,
-              keys,
-              snapshot(),
-              done,
-              perform,
-              demo,
-              view,
-              (listener) => ctx.ui.onTerminalInput(listener),
-            );
-            dashboard.setNotice(notice);
-            if (!demo)
-              refreshDashboard = () => {
-                try {
-                  dashboard?.setData(snapshot());
-                } catch (error) {
-                  dashboard?.setNotice(errorMessage(error, 1000));
-                }
-              };
-            return dashboard;
-          },
-          {
-            overlay: true,
-            overlayOptions: {
-              width: "100%",
-              maxHeight: "100%",
-              anchor: "top-left",
-            },
-          },
-        );
-      } finally {
-        if (dashboard) {
-          view = dashboard.viewState();
-          if (!demo) savedView = view;
-          dashboard.dispose();
-        }
-        closeView = undefined;
-        refreshDashboard = undefined;
-      }
-      if (!choice || !active) return;
-      view = choice.view;
-      if (!demo) savedView = view;
-      try {
-        if (demo)
-          throw new Error(
-            "Demo mode cannot call a model or use the message workflow.",
+    let dashboard: Dashboard | undefined;
+    try {
+      await ctx.ui.custom<void>(
+        (tui, theme, keys, done) => {
+          closeView = () => done();
+          dashboard = new Dashboard(
+            tui,
+            theme,
+            keys,
+            snapshot(),
+            done,
+            perform,
+            demo,
+            view,
+            (listener) => ctx.ui.onTerminalInput(listener),
           );
-        if (choice.action === "refresh") startRefresh(ctx);
-        else {
-          const item = currentItem(choice.item);
-          if (
-            choice.action === "draft-ai" &&
-            item.source !== "mail" &&
-            item.source !== "teams"
-          )
-            startDraft(ctx, item);
-        }
-        return;
-      } catch (error) {
-        notice = errorMessage(error);
+          if (!demo)
+            refreshDashboard = () => {
+              try {
+                dashboard?.setData(snapshot());
+              } catch (error) {
+                dashboard?.setNotice(errorMessage(error, 1000));
+              }
+            };
+          return dashboard;
+        },
+        {
+          overlay: true,
+          overlayOptions: {
+            width: "100%",
+            maxHeight: "100%",
+            anchor: "top-left",
+          },
+        },
+      );
+    } finally {
+      if (dashboard) {
+        if (!demo) savedView = dashboard.viewState();
+        dashboard.dispose();
       }
+      closeView = undefined;
+      refreshDashboard = undefined;
     }
   }
   pi.registerCommand("comms", {
@@ -1000,19 +771,7 @@ export default async function comms(pi: ExtensionAPI) {
         ctx.ui.notify("/comms needs Pi's interactive terminal UI.", "warning");
         return;
       }
-      let command = args.trim().replace(/\s+/g, " ");
-      if (command.startsWith("return ")) {
-        const back = queuedReturn;
-        queuedReturn = undefined;
-        if (
-          !back ||
-          command !== `return ${back.id}` ||
-          !safeReturn(ctx, back.sessionId)
-        )
-          return;
-        queueNotice = back.notice || "";
-        command = "";
-      } else if (returnToQueue || queuedReturn) revokeReturn();
+      const command = args.trim().replace(/\s+/g, " ");
       if (["help", "-h", "--help"].includes(command)) {
         ctx.ui.notify(commandHelp, "info");
         return;
@@ -1051,7 +810,7 @@ export default async function comms(pi: ExtensionAPI) {
           activateTools("comms_snapshot");
           const state = store().read();
           ctx.ui.notify(
-            `Queue: ${state.items.length} retained items\n${store().file}\nNotes: ${notesDirectory(false) || "not configured"}\nTriage: ${triageStatus || "Claude triage has not run in this Pi session."}${draftStatus ? `\nDraft: ${draftStatus.text}` : ""}\n${state.coverage.map((source) => `${source.source} · ${source.account} · ${source.status} · ${source.checkedAt}\n${source.detail}`).join("\n") || "No sources checked. Run /comms refresh using Claude's existing connections."}`,
+            `Queue: ${state.items.length} retained items\n${store().file}\nNotes: ${notesDirectory(false) || "not configured"}\nTriage: ${triageStatus || "Claude triage has not run in this Pi session."}\n${state.coverage.map((source) => `${source.source} · ${source.account} · ${source.status} · ${source.checkedAt}\n${source.detail}`).join("\n") || "No sources checked. Run /comms refresh using Claude's existing connections."}`,
             "info",
           );
           return;

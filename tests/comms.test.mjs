@@ -71,8 +71,7 @@ const { sourceUrl, openSourceLink } = await jiti.import(
 );
 const {
   refreshPrompt,
-  draftPrompt,
-  canonical,
+  triageInstructions,
   notesDirectory,
   reminderArguments,
   snoozeUntil,
@@ -436,9 +435,9 @@ function selectAction(view, label) {
   }
   assert.fail(`Action not found: ${label}`);
 }
-function editDraft(view) {
+function editNext(view) {
   key(view, "\r", "\r");
-  selectAction(view, "Edit local draft");
+  selectAction(view, "Add action to Reminders Next");
 }
 function popup(view, width = 120) {
   const lines = screen(view, width).split("\n");
@@ -488,9 +487,6 @@ test("every screen fills the terminal and stays within bounds after resizing", (
     check();
     key(h.view, "\r"); // Actions stay in this overlay.
     assert.match(screen(h.view), /Request actions/);
-    check();
-    selectAction(h.view, "Edit local draft"); // Full-screen editor.
-    assert.match(screen(h.view), /Local reply draft · save never sends/);
     check();
     assert.equal(h.choice(), undefined);
     key(h.view, "\x1b", "\x1b", "\x07"); // Coverage.
@@ -590,7 +586,7 @@ test("original shortcut keeps the selected request and cannot run from demo, mis
   assert.equal(h.choice(), undefined);
   assert.match(screen(h.view), /Request details/);
   key(h.view, "\r");
-  selectAction(h.view, "Edit local draft");
+  selectAction(h.view, "Add action to Reminders Next");
   key(h.view, "o", "i");
   assert.equal(h.requests.length, 1);
   assert.match(screen(h.view), /INSERT/);
@@ -774,12 +770,12 @@ test("popup selection survives resizing and every scrolled action remains reacha
   assert.equal(h.requests.length, 0);
   h.terminal.rows = 14;
   const seen = new Set();
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 6; i++) {
     const text = popup(h.view).text;
     seen.add(text.match(/→ ([^│\n]+)/)?.[1].trim());
     key(h.view, "\x1b[B");
   }
-  assert.equal(seen.size, 8);
+  assert.equal(seen.size, 6);
   selectAction(h.view, "Dismiss locally");
   await settled();
   assert.equal(h.requests[0].action, "dismiss");
@@ -903,10 +899,11 @@ test("coverage failures remain visible and every account has scrollable evidence
   assert.match(screen(h.view), /Notion · unchecked/);
 });
 
-test("inline editor owns focus, uses Enter for newlines and keeps failed saves intact", async () => {
+test("Next editor owns focus and keeps text after a failed action", async () => {
   const h = dashboard(demoState(first), 30, {
+    demo: false,
     perform: async () => {
-      throw new Error("Concurrent draft changed");
+      throw new Error("Synthetic action failed");
     },
   });
   // The list shows no search cursor until / focuses it.
@@ -914,15 +911,15 @@ test("inline editor owns focus, uses Enter for newlines and keeps failed saves i
   key(h.view, "/");
   assert.ok(h.view.render(120).some((line) => line.includes(CURSOR_MARKER)));
   key(h.view, "\x1b");
-  editDraft(h.view);
+  editNext(h.view);
   assert.ok(h.view.render(120).some((line) => line.includes(CURSOR_MARKER)));
-  key(h.view, "\r", "Extra paragraph", "\x13");
+  key(h.view, "Extra text", "\r");
   await settled();
   assert.equal(h.requests.length, 1);
-  assert.equal(h.requests[0].action, "save-draft");
-  assert.ok(h.requests[0].text.endsWith("\nExtra paragraph"));
-  assert.match(screen(h.view), /Concurrent draft changed/);
-  assert.match(screen(h.view), /Extra paragraph/);
+  assert.equal(h.requests[0].action, "add-next");
+  assert.ok(h.requests[0].text.includes("Extra text"));
+  assert.match(screen(h.view), /Synthetic action failed/);
+  assert.match(screen(h.view), /Extra text/);
   assert.equal(h.choice(), undefined);
   key(h.view, "\x1b");
   assert.match(screen(h.view), /NORMAL/);
@@ -939,39 +936,9 @@ test("inline editor owns focus, uses Enter for newlines and keeps failed saves i
   assert.match(screen(h.view), /Unsaved changes discarded/);
 });
 
-test("manual and AI-prepared replies share Vim changes, undo/redo and save-only controls", async () => {
-  for (const prepared of [false, true]) {
-    const state = demoState(first);
-    const original = prepared ? "AI-prepared reply" : "Manual first version";
-    state.items[0].draft = prepared ? original : "";
-    const h = dashboard(state);
-    editDraft(h.view);
-    assert.match(screen(h.view), /INSERT/);
-    if (!prepared) key(h.view, original);
-    key(h.view, "\x1b", "0", "c", "$", "Reviewed reply", "\x1b");
-    assert.match(screen(h.view), /NORMAL/);
-    assert.match(screen(h.view), /Reviewed reply/);
-    key(h.view, "u");
-    assert.match(screen(h.view), new RegExp(original));
-    key(h.view, "\x12", "\x12");
-    assert.match(screen(h.view), /Reviewed reply/);
-    assert.equal(h.requests.length, 0); // Ctrl+R never refreshes while editing.
-    key(h.view, "A", "\r", "Second paragraph 👋");
-    assert.equal(h.requests.length, 0); // Enter cannot save or send.
-    if (prepared) key(h.view, "\x1b");
-    key(h.view, "\x13");
-    await settled();
-    assert.equal(h.requests.length, 1);
-    assert.equal(h.requests[0].action, "save-draft");
-    assert.equal(h.requests[0].text, "Reviewed reply\nSecond paragraph 👋");
-    assert.equal(h.choice(), undefined);
-    assert.equal(h.inputListeners.size, 1);
-  }
-});
-
-test("Escape cancels Vim operators before leaving a draft or confirming discard", () => {
-  const h = dashboard();
-  editDraft(h.view);
+test("Escape cancels Vim operators before leaving a Next action or confirming discard", () => {
+  const h = dashboard(demoState(first), 30, { demo: false });
+  editNext(h.view);
   assert.equal(h.inputListeners.size, 2);
   key(h.view, "\x1b", "d");
   assert.match(screen(h.view), /d · NORMAL/);
@@ -981,8 +948,8 @@ test("Escape cancels Vim operators before leaving a draft or confirming discard"
   key(h.view, "\x1b");
   assert.match(screen(h.view), /Request details/);
   assert.equal(h.inputListeners.size, 1);
-  key(h.view, "\x1b"); // List, then reopen the same reply.
-  editDraft(h.view);
+  key(h.view, "\x1b"); // List, then reopen the same request.
+  editNext(h.view);
   key(h.view, "Unsaved edit", "\x1b");
   assert.doesNotMatch(screen(h.view), /Unsaved changes/);
   key(h.view, "\x1b");
@@ -994,25 +961,23 @@ test("Escape cancels Vim operators before leaving a draft or confirming discard"
   assert.equal(h.inputListeners.size, 1);
 });
 
-test("Vim paste handling retains fragmented Escape bytes without closing the reply", async () => {
-  const state = demoState(first);
-  state.items[0].draft = "";
-  const h = dashboard(state);
-  editDraft(h.view);
+test("Vim paste handling retains fragmented Escape bytes in the Next editor", async () => {
+  const h = dashboard(demoState(first), 30, { demo: false });
+  editNext(h.view);
   key(h.view, "\x1b[200~literal cw dd", "\x1b", "\n👋\x1b[201~");
   assert.match(screen(h.view), /INSERT/);
   assert.doesNotMatch(screen(h.view), /Unsaved changes/);
   key(h.view, "\x13");
   await settled();
-  assert.equal(h.requests[0].action, "save-draft");
+  assert.equal(h.requests[0].action, "add-next");
   assert.ok(h.requests[0].text.includes("literal cw dd"));
   assert.ok(h.requests[0].text.includes("👋"));
 });
 
 test("viewport input cannot leave a destructive Vim prefix armed in Comms", async () => {
-  const h = dashboard();
-  const original = h.data.state.items[0].draft;
-  editDraft(h.view);
+  const h = dashboard(demoState(first), 30, { demo: false });
+  const original = firstSentence(h.data.state.items[0].suggestion);
+  editNext(h.view);
   h.input("\x1b");
   h.input("0");
   // Mimic renderer rebinding, which moves the observer after the viewport.
@@ -1043,58 +1008,86 @@ test("Next action editing uses Vim without changing its explicit save behavior",
 });
 
 test("editor listeners are removed after disposal and unsupported hooks fall back safely", () => {
-  const h = dashboard();
-  editDraft(h.view);
+  const h = dashboard(demoState(first), 30, { demo: false });
+  editNext(h.view);
   assert.equal(h.inputListeners.size, 2);
   h.view.dispose();
   h.view.dispose();
   assert.equal(h.inputListeners.size, 1);
-  const fallback = dashboard(demoState(first), 30, { inputHook: false });
-  editDraft(fallback.view);
+  const fallback = dashboard(demoState(first), 30, {
+    demo: false,
+    inputHook: false,
+  });
+  editNext(fallback.view);
   assert.match(screen(fallback.view), /Vim mode is unavailable/);
   assert.equal(fallback.inputListeners.size, 1);
   key(fallback.view, "\x1b");
   assert.match(screen(fallback.view), /Request details/);
 });
 
-test("calendar keeps Pi drafting, while demo hides live actions", () => {
-  const state = demoState(first);
-  state.items[0].source = "calendar";
-  const h = dashboard(state, 30, { demo: false });
-  key(h.view, "\r", "\r");
-  selectAction(h.view, "Draft with AI");
-  assert.equal(h.choice().action, "draft-ai");
-  assert.equal(h.choice().item.key, h.data.state.items[0].key);
-  const demo = dashboard();
+test("demo hides live handoff and drafting actions", () => {
+  const demo = dashboard(demoState(first), 30, { data: { canSplit: true } });
   key(demo.view, "\r", "\r");
   assert.doesNotMatch(
     screen(demo.view),
-    /Draft with Claude|Draft with AI|Review & send reply|Review & create Outlook draft|Open original|Add action to Reminders/,
+    /Draft with Claude|Draft with AI|Open in split|Copy context|Review & send reply|Review & create Outlook draft|Open original|Add action to Reminders/,
   );
 });
 
-test("replacing a saved Teams draft requires a second selection and keeps the queue open", async () => {
-  const h = dashboard(demoState(first), 30, { demo: false });
-  key(h.view, "\r", "\r");
-  selectAction(h.view, "Draft with Claude");
-  assert.match(screen(h.view), /Replace the saved local draft\?/);
-  assert.equal(h.requests.length, 0);
-  selectAction(h.view, "Keep saved draft");
-  assert.equal(h.requests.length, 0);
+test("agent picker stays over the same thread on cancel and launch", async () => {
+  const h = dashboard(demoState(first), 30, {
+    demo: false,
+    data: { canSplit: true },
+  });
   key(h.view, "\r");
-  selectAction(h.view, "Draft with Claude");
+  const detail = screen(h.view);
+  const before = h.view.viewState();
+  key(h.view, "\r");
+  const actions = popup(h.view).text;
+  assert.match(actions, /→ Open in split & copy context/);
+  assert.doesNotMatch(
+    actions,
+    /Edit local draft|Draft with Claude|Draft with AI|Copy draft|→ Copy context/,
+  );
+  assert.match(actions, /Waiting for a reply|Dismiss locally/);
+  key(h.view, "\r");
+  assert.match(popup(h.view).text, /→ Claude/);
+  assert.match(popup(h.view).text, /Pi[ \t]+│/);
+  assert.match(popup(h.view).text, /Codex/);
+  assert.match(screen(h.view), /Request details/);
+  key(h.view, "\x1b");
+  assert.equal(screen(h.view), detail);
+  assert.equal(h.requests.length, 0);
+  key(h.view, "\r", "\r", "\x1b[B");
   h.terminal.rows = 25;
-  selectAction(h.view, "Replace with Claude draft");
+  assert.match(popup(h.view).text, /→ Pi/);
+  key(h.view, "\r");
   await settled();
   assert.equal(h.requests.length, 1);
-  assert.equal(h.requests[0].action, "replace-draft-claude");
+  assert.equal(h.requests[0].action, "open-agent-split");
+  assert.equal(h.requests[0].agent, "pi");
+  assert.equal(h.requests[0].item.key, before.selected);
+  assert.equal(h.requests[0].item.draft, h.data.state.items[0].draft);
+  assert.deepEqual(h.view.viewState(), before);
+  assert.equal(h.choice(), undefined);
+  assert.match(screen(h.view), /Request details/);
+});
+
+test("outside tmux, Copy context is the handoff action", async () => {
+  const h = dashboard(demoState(first), 30, { demo: false });
+  key(h.view, "\r", "\r");
+  assert.doesNotMatch(popup(h.view).text, /Open in split/);
+  selectAction(h.view, "Copy context");
+  await settled();
+  assert.equal(h.requests[0].action, "copy-context");
   assert.equal(h.requests[0].item.key, h.data.state.items[0].key);
+  assert.match(screen(h.view), /Request details/);
   assert.equal(h.choice(), undefined);
 });
 
 test("narrow screens cannot apply hidden editor actions, and disposed views ignore input", async () => {
-  const h = dashboard();
-  editDraft(h.view);
+  const h = dashboard(demoState(first), 30, { demo: false });
+  editNext(h.view);
   key(h.view, "Unsaved");
   h.terminal.rows = 10;
   screen(h.view, 20);
@@ -1163,10 +1156,10 @@ test("Claude triage starts and cancels in place without closing the dashboard", 
   assert.match(screen(h.view), /Claude triage cancelled/);
 });
 
-test("worker progress and results never discard an inline draft editor", () => {
-  const h = dashboard();
-  editDraft(h.view);
-  key(h.view, "\r", "KEEP-THIS-LOCAL-EDIT");
+test("worker progress and results never discard an inline Next editor", () => {
+  const h = dashboard(demoState(first), 30, { demo: false });
+  editNext(h.view);
+  key(h.view, "KEEP-THIS-LOCAL-EDIT");
   const changed = demoState(first);
   changed.items[0].draftRevision++;
   h.view.setData({
@@ -1176,7 +1169,7 @@ test("worker progress and results never discard an inline draft editor", () => {
     triageRunning: false,
   });
   assert.match(screen(h.view), /KEEP-THIS-LOCAL-EDIT/);
-  assert.match(screen(h.view), /Local reply draft/);
+  assert.match(screen(h.view), /save adds one action/);
   assert.equal(h.choice(), undefined);
 });
 
@@ -1555,7 +1548,10 @@ test(
 
 test("Pi's real loader registers the extension, blocks unsolicited ingestion and headless commands", async (t) => {
   const h = await harness(t);
-  assert.equal(h.tools.length, 3);
+  assert.deepEqual(
+    h.tools.map((tool) => tool.name),
+    ["comms_snapshot", "comms_ingest"],
+  );
   const ingestTool = h.tools.find((tool) => tool.name === "comms_ingest");
   await assert.rejects(
     () => ingestTool.execute("x", { runId: "invented" }),
@@ -1662,7 +1658,7 @@ test("/comms next is gone, so Comms never reads Reminders", async (t) => {
   assert.doesNotMatch(h.notices.at(-1), /\/comms next/);
 });
 
-test("local draft saving stays in one overlay and persists without running a model", async (t) => {
+test("stale handoff context is rejected in the same overlay without starting a model turn", async (t) => {
   const h = await harness(t);
   const store = new Store(join(h.directory, "comms"));
   store.update((state) => Object.assign(state, demoState(first)));
@@ -1681,12 +1677,16 @@ test("local draft saving stays in one overlay and persists without running a mod
     );
     view.focused = true;
     screen(view);
-    editDraft(view);
-    key(view, "\r", "Saved inline", "\x13");
+    key(view, "\r", "\r");
+    store.update((state) => {
+      state.items[0].summary += " Changed elsewhere.";
+    });
+    const latest = store.read().items[0];
+    selectAction(view, "Copy context");
     await settled();
-    assert.match(screen(view), /Local draft saved. Nothing sent/);
-    assert.ok(store.read().items[0].draft.endsWith("\nSaved inline"));
-    assert.doesNotMatch(screen(view), /Ctrl\+S save/);
+    assert.match(screen(view), /The request changed/);
+    assert.match(screen(view), /Request details/);
+    assert.deepEqual(store.read().items[0], latest);
     return undefined;
   };
   await h.command.handler("", h.ctx);
@@ -1694,7 +1694,7 @@ test("local draft saving stays in one overlay and persists without running a mod
   assert.equal(h.prompts.length, 0);
 });
 
-test("a concurrent source change rejects the inline save without losing edited text", async (t) => {
+test("a concurrent source change rejects the Next action without losing edited text", async (t) => {
   const h = await harness(t);
   const store = new Store(join(h.directory, "comms"));
   store.update((state) => Object.assign(state, demoState(first)));
@@ -1706,8 +1706,8 @@ test("a concurrent source change rejects the inline save without losing edited t
       () => {},
     );
     screen(view);
-    editDraft(view);
-    key(view, "\r", "Keep this unsaved text");
+    editNext(view);
+    key(view, "Keep this unsaved text");
     store.update((state) => {
       const item = state.items[0];
       ingest(
@@ -1725,7 +1725,7 @@ test("a concurrent source change rejects the inline save without losing edited t
     assert.match(screen(view), /This request changed/);
     assert.match(screen(view), /Keep this unsaved text/);
     assert.equal(store.read().items[0].draftStale, true);
-    assert.ok(!store.read().items[0].draft.includes("Keep this unsaved text"));
+    assert.equal(store.read().items[0].reminderAdded, undefined);
     return undefined;
   };
   await h.command.handler("", h.ctx);
@@ -1741,7 +1741,7 @@ test("session shutdown closes the inline Vim editor and unregisters its observer
       view = factory(h.tui, getThemeByName("dark"), getKeybindings(), done);
       view.focused = true;
       screen(view);
-      editDraft(view);
+      editNext(view);
       key(view, "Keep unsaved text", "\x1b", "d");
     });
   const browsing = h.command.handler("", h.ctx);
@@ -1751,7 +1751,7 @@ test("session shutdown closes the inline Vim editor and unregisters its observer
   await browsing;
   assert.equal(h.tui.inputListeners.size, 1);
   key(view, "w", "\x13");
-  assert.ok(!store.read().items[0].draft.includes("Keep unsaved text"));
+  assert.equal(store.read().items[0].reminderAdded, undefined);
 });
 
 test("a manual resolve and undo round trip wins over an in-flight triage resolution", async (t) => {
@@ -1806,11 +1806,11 @@ test("local actions preserve plan-mode restrictions and status updates do not ex
     key(view, "u");
     await settled();
     assert.match(screen(view), /Leave \/plan mode/);
-    editDraft(view);
+    editNext(view);
     key(view, "Blocked edit", "\x13");
     await settled();
     assert.match(screen(view), /Leave \/plan mode/);
-    assert.ok(!store.read().items[0].draft.includes("Blocked edit"));
+    assert.equal(store.read().items[0].reminderAdded, undefined);
     key(view, "\x1b", "\x1b", "\x1b");
     h.events.emit("dotfiles:plan-mode", false);
     key(view, "\r");
@@ -1868,7 +1868,7 @@ test("waiting returns after three days and u undoes decisions newest first", asy
 
 for (const mode of ["regular", "fullscreen"])
   test(
-    `real Pi PTY ${mode} keeps table, actions and editing inside the Comms window`,
+    `real Pi PTY ${mode} keeps table and actions inside the Comms window`,
     {
       skip:
         process.platform !== "darwin" ||
@@ -1921,37 +1921,16 @@ try:
     os.write(master, b'\\r')
     wait_for(b'Request actions')
     data = b''
-    os.write(master, b'\\r')
-    wait_for(b'save never sends')
-    data = b''
-    os.write(master, b'\\r\\x1b[200~INLINE-DRAFT-END\\x1b[201~')
-    wait_for(b'INLINE-DRAFT-END')
-    data = b''
-    os.write(master, b'\\x1b')
-    wait_for(b'NORMAL')
-    data = b''
-    os.write(master, b'0c$\\x1b[200~VIM-REVIEWED-END\\x1b[201~')
-    wait_for(b'VIM-REVIEWED-END')
-    data = b''
-    os.write(master, b'\\x1b')
-    wait_for(b'NORMAL')
-    data = b''
-    os.write(master, b'u')
-    wait_for(b'INLINE-DRAFT-END')
-    data = b''
-    os.write(master, b'\\x12')
-    wait_for(b'VIM-REVIEWED-END')
-    data = b''
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 10, 45, 0, 0))
     os.kill(p.pid, signal.SIGWINCH)
-    wait_for(b'Editor paused')
+    wait_for(b'Enlarge terminal')
     data = b''
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 120, 0, 0))
     os.kill(p.pid, signal.SIGWINCH)
-    wait_for(b'VIM-REVIEWED-END')
+    wait_for(b'Request actions')
     data = b''
-    os.write(master, b'\\x13')
-    wait_for(b'Local draft saved. Nothing sent.')
+    os.write(master, b'\\x1b')
+    wait_for(b'Request details')
     data = b''
     os.write(master, b'\\x1b')
     wait_for(b'Tab views')
@@ -1973,7 +1952,7 @@ try:
             try: data += os.read(master, 65536)
             except OSError: break
     if p.poll() is None: raise RuntimeError('Exit did not complete: '+repr(data[-3000:]))
-    print(json.dumps({'exit': p.returncode, 'saved': True}))
+    print(json.dumps({'exit': p.returncode}))
 finally:
     if p.poll() is None: p.kill()
     os.close(master)
@@ -2012,7 +1991,7 @@ finally:
           },
         },
       );
-      assert.deepEqual(JSON.parse(output), { exit: 0, saved: true });
+      assert.deepEqual(JSON.parse(output), { exit: 0 });
       assert.equal(existsSync(external), false);
       assert.equal(existsSync(join(home, "pi/comms")), false);
     },
@@ -2144,10 +2123,6 @@ test("legacy meeting and scratchpad items keep loading with generic actions only
   legacyMeeting(state, "a".repeat(32)).status = "resolved";
   const scratch = legacyScratch(state);
   assert.equal(validateState(state), state);
-  assert.throws(
-    () => draftPrompt(meeting, "message.md"),
-    /do not support drafting/,
-  );
   for (const item of [meeting, scratch]) {
     const h = dashboard(state, 30, {
       demo: false,
@@ -2161,7 +2136,7 @@ test("legacy meeting and scratchpad items keep loading with generic actions only
     assert.match(text, /Resolve locally/);
     assert.doesNotMatch(
       text,
-      /Draft with Claude|Draft with AI|Edit local draft|Integrate/,
+      /Draft with Claude|Draft with AI|Open in split|Copy context|Edit local draft|Integrate/,
     );
   }
 });
@@ -2285,15 +2260,14 @@ test("demo does not inspect an existing corrupt real queue or authorize snapshot
 
 test("bundled defaults need no notes checkout and explicit overrides outrank legacy files", async (t) => {
   const h = await harness(t);
-  const legacy = canonical("triage");
+  const legacy = triageInstructions();
   assert.match(legacy, /\.claude\/commands\/triage.md/);
   withoutNotes(t);
   const config = configured(t, {});
-  for (const name of ["triage", "message"])
-    assert.equal(
-      canonical(name),
-      packagePath("workflows", "comms", `${name}.md`),
-    );
+  assert.equal(
+    triageInstructions(),
+    packagePath("workflows", "comms", "triage.md"),
+  );
   assert.throws(() => notesDirectory(), /notesDirectory/);
   await h.command.handler("refresh pi", h.ctx);
   assert.equal(h.prompts.length, 1);
@@ -2311,18 +2285,17 @@ test("bundled defaults need no notes checkout and explicit overrides outrank leg
       },
     }),
   );
-  assert.equal(canonical("triage"), override);
-  assert.match(canonical("message"), /\.claude\/commands\/message.md/);
+  assert.equal(triageInstructions(), override);
 });
 
 test("malformed config and missing required overrides never silently use defaults", (t) => {
   const file = configured(t, {
     comms: { triageInstructions: join(temporary(t), "missing.md") },
   });
-  assert.throws(() => canonical("triage"), /Missing configured workflow/);
+  assert.throws(() => triageInstructions(), /Missing configured workflow/);
   writeFileSync(file, "{ malformed");
   for (const call of [
-    () => canonical("triage"),
+    () => triageInstructions(),
     () => notesDirectory(false),
     () => reminderArguments(),
   ])
@@ -2344,7 +2317,6 @@ test("configured identity timezone and list propagate to prompts, helper argv an
   for (const prompt of [
     refreshPrompt("run", second, emptyState(), "triage.md"),
     externalPrompt("run", second, emptyState(), "TRIAGE"),
-    draftPrompt(demoState(first).items[0], "message.md"),
   ]) {
     assert.match(prompt, /Synthetic User/);
     assert.doesNotMatch(prompt, /Calendar timezone: "UTC"/);

@@ -14,7 +14,7 @@ With Pi and this package's JavaScript dependencies already installed, start from
 pi -e ./extensions/comms/index.ts
 ```
 
-Then run `/comms demo`. Demo uses disposable, memory-only data. It cannot read the real queue, enable queue tools, call models, open live sources or write reminders. Copying a demo draft is an explicit clipboard action.
+Then run `/comms demo`. Demo uses disposable, memory-only data. It cannot read the real queue, enable queue tools, call models, open live sources or write reminders.
 
 | Command             | Effect                                     |
 | ------------------- | ------------------------------------------ |
@@ -35,7 +35,7 @@ Then run `/comms demo`. Demo uses disposable, memory-only data. It cannot read t
 
 Letters act on the selected item. They type into search only after `/`. Next closes the item only if nothing changed while Reminders ran. Otherwise the action stays in Reminders and the item stays open for another look. A legacy meeting or scratchpad review opens its menu instead, because one reminder must not close its other actions.
 
-Tab switches between Top and Needs you. Ctrl+G shows coverage. Ctrl+L reloads local state. Ctrl+R starts collection or resets demo fixtures. Ctrl+X cancels the running Claude job. Escape closes the view. Ctrl+S saves an edited draft.
+Tab switches between Top and Needs you. Ctrl+G shows coverage. Ctrl+L reloads local state. Ctrl+R starts collection or resets demo fixtures. Ctrl+X cancels the running Claude collector. Escape goes back.
 
 Needs you lists every item that needs you, by rank, then oldest first. Rank is the item's priority, except that anything due within 48 hours counts as priority 1. Within rank 1 the nearest deadline leads. A deadline further out never jumps ahead of older items. The Updated column shows `due 5h` or `late 2d` for an item with a deadline. Top shows its first five. Deciding one reveals the next. Search and the source filter apply first. The tabs carry the counts, and the header shows the age of the oldest item. Age runs from the item's latest reopening, then from when Comms first saw it. Items saved before that was recorded use their source time.
 
@@ -55,9 +55,15 @@ The finish notice and source coverage name the requests that someone else's repl
 
 Collection always suggests a concrete next action. It can also prepare a local reply for mail or Teams when the thread and recipient are verified and nothing blocks the answer. A blocker is a missing fact, unreadable evidence, an unverified recipient or ownership, or a decision only you can make. Any blocker withholds the reply and is shown on the item. Residual doubt about whether the ask is still open is shown as uncertainty, one line, and does not withhold the reply. Each refresh reports how many proposals arrived and how many became drafts, in the finish notice and in source coverage. Proposals seed only new or untouched empty drafts. Refresh never replaces your saved wording or resurrects a deliberately cleared draft.
 
-For mail and Teams, open an item and choose **Draft with Claude**. Claude Code checks the connected account, exact thread, recipient and latest replies. Pi stays in the queue and shows a local draft or the reason it could not draft. Replacing a saved draft requires confirmation. Changes made while Claude runs take precedence over its result. Calendar and Notion still use **Draft with AI** in Pi, with automatic return to the queue when focus is free.
+Saved drafts and triage proposals are readable in the thread details and included when you hand off the context. Write or revise the reply in the agent pane. Comms never sends messages or creates remote drafts.
 
-Edit locally with Ctrl+S, copy the draft and open the original to send it yourself. Comms never sends messages or creates remote drafts.
+## Open in split
+
+Inside local tmux on macOS, choose **Open in split & copy context**, then Claude, Pi or Codex in the popup over the thread. Esc closes the picker without leaving the thread. The agent opens in a focused right-hand pane in the same window. The same Comms thread stays visible in the original pane. The agent uses its local profile and starts in the configured notes directory or current project.
+
+When the agent's prompt is ready, paste the clipboard and add your notes at `My instructions:`. The clipboard contains only the selected item's source details, labeled Comms summary and any saved draft. Comms never pastes or submits it. The prompt asks for reply text only. Live thread access depends on the agent's connectors, and its normal permissions and history apply after you submit.
+
+Outside tmux, choose **Copy context** and open the agent yourself. The queue and saved draft stay unchanged, and the agent's reply is not imported.
 
 ## Legacy items
 
@@ -73,18 +79,17 @@ Use the package's user configuration at `$XDG_CONFIG_HOME/pi-extensions/config.j
   "comms": {
     "notesDirectory": null,
     "triageInstructions": null,
-    "messageInstructions": null,
     "voiceInstructions": null,
     "reminderList": "Next"
   }
 }
 ```
 
-Neutral triage and message templates ship in `workflows/comms/`. No private notes checkout is required for demo or normal collection. Explicit instruction paths override bundled templates. For compatibility, a configured notes directory or `PI_COMMS_NOTES_DIR` can supply `.claude/commands/triage.md` and `.claude/commands/message.md`. Explicit instruction paths take precedence. The environment variable overrides the notes directory only. Missing legacy files use bundled templates. Missing required overrides fail visibly.
+The bundled triage template lives in `workflows/comms/triage.md`. No private notes checkout is required. A configured notes directory or `PI_COMMS_NOTES_DIR` can supply `.claude/commands/triage.md`. An explicit `triageInstructions` path takes precedence and fails visibly if missing.
 
-`voiceInstructions` points to an optional private file of writing rules for replies, at most 8 KiB. Both collectors and **Draft with Claude** receive it inlined as style guidance. `messageInstructions` applies to Pi-native drafting only. An unreadable or oversized file is reported and drafts use the default voice. Each draft records whether triage, AI or you wrote it. That is provenance only, never evidence that it was sent.
+`voiceInstructions` points to an optional private file of writing rules for replies, at most 8 KiB. Both collectors receive it inlined as style guidance. An unreadable or oversized file is reported and proposals use the default voice. Existing drafts keep their provenance, which is never evidence that they were sent.
 
-`meetingInstructions`, `remarkableSource` and `notebookName` are still accepted so older configuration files load. Comms no longer uses them. Accepted actions use the configured Reminders list. Calendar windows, snoozes and waiting follow-ups use the configured timezone. Identity labels never replace authenticated-account verification.
+`messageInstructions`, `meetingInstructions`, `remarkableSource` and `notebookName` are still accepted so older configuration files load. Comms no longer uses them. Accepted actions use the configured Reminders list. Calendar windows, snoozes and waiting follow-ups use the configured timezone. Identity labels never replace authenticated-account verification.
 
 ## Scheduled refresh
 
@@ -108,9 +113,9 @@ Local review and collection can run on other platforms. Reminders and source lau
 
 ## Privacy and protections
 
-Queue tools start inactive. Their execution guards reject calls before a user `/comms` action, even if a caller tries invoking them directly. Pi-native refresh and selected AI actions enable only their required tools. Mutations also require the current job token or selected-item revision. Demo grants no access to the real queue.
+Queue tools start inactive. Their execution guards reject calls before a user `/comms` action, even if a caller tries invoking them directly. Pi-native refresh enables only its required tools. Collector writes to the queue require the current job token. Demo grants no access to the real queue.
 
-Comms initializes the bundled approval guard even when loaded alone. Collection and drafting block external writes, including nested calls. These are workflow guards, not an OS sandbox. Read-only connector annotations are hints. No automatic remote writes or automatic retries occur.
+Comms initializes the bundled approval guard even when loaded alone. Collection blocks external writes, including nested calls. The handoff launches a blank agent and never submits a prompt. These are workflow guards, not an OS sandbox. Read-only connector annotations are hints. No automatic remote writes or automatic retries occur.
 
 The Claude collector receives minimal source evidence and retained requests, excluding local reply drafts and legacy items. It uses a non-persistent session, a read allowlist, a 100-turn cap, a 15-minute process limit and a 16 MiB output limit. Cancellation or fatal process errors import nothing. Valid source/account results merge independently. Failed or partial sources keep their checkpoint. Missing requests never imply completion. Evidence-backed resolution applies only to unchanged retained items. Concurrent edits and drafts are preserved.
 
@@ -118,9 +123,7 @@ Notion page fetches never include raw transcripts.
 
 Private state stays at `<Pi agent directory>/comms/queue.json`, respecting `PI_CODING_AGENT_DIR`. Directories use `0700` and files `0600`. Existing paths and item keys are preserved. Atomic writes, revision checks, size limits and locks protect the queue. Corrupt state is reported without replacement. Inspect a lock's PID and remote outcome before removing a stale `write.lock` or `triage.lock`.
 
-**Draft with Claude** passes the selected request and configured writing rules to the non-persistent Claude child. Existing drafts and other queue items are excluded. Trusted Claude startup settings and hooks still apply. The child has a source-specific Microsoft 365 read allowlist, a 16-turn cap and a two-minute process limit. Pi saves only a validated local reply for an unchanged request. Missing verification or a blocker leaves the draft and queue status unchanged.
-
-Pi-native collection and Pi-native AI drafting send evidence to Pi's selected model and retain it in session history. Resolved history and legacy capture images under `comms/remarkable-pages/` are not automatically deleted.
+Pi-native collection sends evidence to Pi's selected model and retain it in session history. Resolved history and legacy capture images under `comms/remarkable-pages/` are not automatically deleted.
 
 ## Offline checks
 

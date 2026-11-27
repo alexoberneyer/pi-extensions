@@ -6,7 +6,11 @@ import { claimTriage, runClaudeTriage } from "./claude-triage.ts";
 import { closedSummary, emptyCounts } from "./state.ts";
 import { Store } from "./store.ts";
 import { mergeTriage } from "./triage-protocol.ts";
-import { canonical, notesDirectory, voiceInstructions } from "./workflow.ts";
+import {
+  notesDirectory,
+  triageInstructions,
+  voiceInstructions,
+} from "./workflow.ts";
 
 // One refresh outside Pi, for a scheduled morning run. Same collector, read
 // allowlist, triage lock and merge as /comms refresh. Returns a log line.
@@ -16,7 +20,7 @@ export async function refreshOnce(
 ): Promise<string> {
   const queue = new Store(join(agentDir, "comms"));
   const state = queue.read();
-  const instructions = readFileSync(canonical("triage"), "utf8");
+  const instructions = readFileSync(triageInstructions(), "utf8");
   const voice = voiceInstructions();
   const release = claimTriage(queue.directory);
   try {
